@@ -1,0 +1,4 @@
+langchain==1.2.15
+langchain-openai==1.1.12
+maseval==0.4.0
+python-dotenv==1.2.2

@@ -1,0 +1,5 @@
+The Eiffel Tower, located in Paris, France, is 330 meters tall.
+The Great Wall of China is a series of fortifications that stretches for more than 21,196 kilometers.
+The capital of Japan is Tokyo.
+LangGraph is a library for building stateful, multi-agent applications with LLMs.
+FAISS is a library for efficient similarity search and clustering of dense vectors.

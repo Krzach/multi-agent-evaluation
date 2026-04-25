@@ -1,10 +1,11 @@
 import os
 import json
+import time
 from dotenv import load_dotenv
 
 from coding_scenario.langchain_mas import CommanderWriterSafeguardSystem
-from benchmarks.multiagentbench.dataset import MultiAgentBenchDataset
-from benchmarks.multiagentbench.runner import MultiAgentBenchRunner
+from benchmarks.human_eval.dataset import HumanEvalDataset
+from benchmarks.human_eval.runner import HumanEvalRunner
 
 def main():
     # Load environment variables (e.g., OPENAI_API_KEY)
@@ -15,17 +16,20 @@ def main():
         print("Please set it in your .env file or environment variables before running.")
         return
 
-    print("Initializing MultiAgentBench Evaluation...")
+    print("Initializing HumanEval Evaluation...")
 
-    # 1. Load the dataset (using the 4 tasks we created)
-    dataset_path = os.path.join("benchmarks", "data", "multiagentbench_subset.json")
-    dataset = MultiAgentBenchDataset(dataset_path)
-    tasks = dataset.get_tasks()
-    
-    print(f"Loaded {len(tasks)} tasks.")
+    # 1. Load the dataset (from huggingface datasets)
+    try:
+        dataset = HumanEvalDataset(split="test")
+        # We limit to 5 tasks for a quick test run. Remove limit to run all 164 tasks.
+        tasks = dataset.get_tasks(limit=5)
+        print(f"Loaded {len(tasks)} tasks from HumanEval.")
+    except Exception as e:
+        print(f"Failed to load dataset: {e}")
+        print("Make sure you have installed 'datasets': pip install datasets")
+        return
 
     # 2. Initialize the real Agent System
-    # You can change the model_id to "gpt-4" or others if you prefer
     model_id = "gpt-4o-mini" 
     max_iterations = 3
     print(f"Initializing CommanderWriterSafeguardSystem with model: {model_id} (max iterations: {max_iterations})")
@@ -33,7 +37,7 @@ def main():
     agent = CommanderWriterSafeguardSystem(model_id=model_id, max_iterations=max_iterations)
 
     # 3. Initialize the Runner
-    runner = MultiAgentBenchRunner(mas_instance=agent)
+    runner = HumanEvalRunner(agent_framework=agent)
 
     # 4. Run the Evaluation
     print("Starting evaluation (this may take a few minutes)...")
@@ -41,7 +45,7 @@ def main():
 
     # 5. Output the results
     print("\n" + "="*50)
-    print("EVALUATION RESULTS")
+    print("EVALUATION RESULTS (HUMANEVAL)")
     print("="*50)
     
     total_correct = 0
@@ -74,7 +78,7 @@ def main():
         print(f"Conversation Turns: {res['collaboration_metrics']['conversation_iterations']}")
         print(f"Messages Exchanged: {messages}")
         print(f"Safeguard Blocked: {res['collaboration_metrics']['safeguard_blocked']}")
-        print(f"Final Answer Preview: {res['final_answer'][:100]}...")
+        print(f"Final Code Preview:\n{res['generated_code'][:150]}...")
         print("-" * 30)
 
     accuracy = (total_correct / len(tasks)) * 100 if tasks else 0
@@ -89,7 +93,7 @@ def main():
     print(f"Average Messages per Task: {avg_messages:.1f}")
     
     # Save detailed results to a JSON file
-    output_file = "mab_evaluation_results.json"
+    output_file = "humaneval_results.json"
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nDetailed results saved to {output_file}")

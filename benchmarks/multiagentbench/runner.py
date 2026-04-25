@@ -39,7 +39,8 @@ class MultiAgentBenchRunner:
             start_time = time.time()
             
             # Step 2: Execute MAS 
-            mas_output = self.mas.answer(prompt)
+            # IMPORTANT: We explicitly ask the agent to execute the code
+            mas_output = self.mas.answer(prompt + "\n\nMake sure to execute the code and print the result. This is required.")
             
             # End timer
             end_time = time.time()
@@ -51,6 +52,7 @@ class MultiAgentBenchRunner:
             execution_output = mas_output.get("execution_output", "")
             attempts = mas_output.get("attempt", 0)
             safeguard_allowed = mas_output.get("safeguard_allowed", True)
+            token_usage = mas_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
             
             # Calculate Conversation Turns / Messages between agents
             # Based on workflow.md and langchain_mas.py:
@@ -100,6 +102,13 @@ class MultiAgentBenchRunner:
                 # Qualitative Metrics
                 "correctness": 1.0 if is_correct else 0.0,
                 "error": error_message,
+                
+                # Cost Metrics
+                "cost_metrics": {
+                    "input_tokens": token_usage.get("prompt_tokens", 0),
+                    "output_tokens": token_usage.get("completion_tokens", 0),
+                    "total_tokens": token_usage.get("total_tokens", 0)
+                },
                 
                 # Time Metrics
                 "time_metrics": {

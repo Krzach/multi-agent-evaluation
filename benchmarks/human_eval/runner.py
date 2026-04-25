@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import List, Dict, Any
 
 class HumanEvalRunner:
@@ -28,9 +29,33 @@ class HumanEvalRunner:
                 "Do not include explanations or markdown formatting if possible."
             )
             
+            # Start timer for Total Task Completion Time
+            start_time = time.time()
+            
             # Execute agent framework
-            output = self.agent.run_task(task_input=task_input)
-            generated_code = output['response']
+            # We call the `answer` method to hook directly into the CommanderWriterSafeguardSystem
+            if hasattr(self.agent, 'answer'):
+                mas_output = self.agent.answer(task_input)
+                generated_code = mas_output.get("writer_code", "")
+                attempts = mas_output.get("attempt", 0)
+                safeguard_allowed = mas_output.get("safeguard_allowed", True)
+                token_usage = mas_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0})
+            else:
+                # Fallback for generic agents (e.g. MWE LangGraph setup)
+                mas_output = self.agent.run_task(task_input=task_input)
+                generated_code = mas_output.get('response', '')
+                attempts = 0
+                safeguard_allowed = True
+                token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+            
+            # End timer
+            end_time = time.time()
+            total_task_time = end_time - start_time
+            
+            # Calculate Collaboration Metrics
+            messages_per_attempt = 4
+            base_messages = 2 
+            total_messages = base_messages + ((attempts + 1) * messages_per_attempt)
             
             # Basic cleanup: if the agent outputs markdown code blocks, extract the code
             clean_code = generated_code
@@ -60,9 +85,30 @@ class HumanEvalRunner:
                 "task_id": task_id,
                 "prompt": prompt,
                 "generated_code": clean_code,
+                
+                # Qualitative Metrics
                 "correctness": 1.0 if is_correct else 0.0,
                 "error": error_message,
-                "metrics": self.agent.metrics_tracker.get_summary() if self.agent.metrics_tracker else None
+                
+                # Cost Metrics
+                "cost_metrics": {
+                    "input_tokens": token_usage.get("prompt_tokens", 0),
+                    "output_tokens": token_usage.get("completion_tokens", 0),
+                    "total_tokens": token_usage.get("total_tokens", 0)
+                },
+                
+                # Time Metrics
+                "time_metrics": {
+                    "total_task_completion_time_seconds": total_task_time
+                },
+                
+                # Agent Collaboration Metrics
+                "collaboration_metrics": {
+                    "conversation_iterations": attempts,
+                    "messages_between_agents": total_messages,
+                    "activated_agents": 3 if hasattr(self.agent, 'answer') else 1, 
+                    "safeguard_blocked": not safeguard_allowed
+                }
             })
             
         return results

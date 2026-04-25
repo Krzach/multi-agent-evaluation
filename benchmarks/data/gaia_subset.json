@@ -1,0 +1,67 @@
+[
+  {
+    "task_id": "8f3e5f22-2621-4b13-a4c3-63161245eb8a",
+    "Question": "What is the name of the ancient Roman city that was destroyed by Mount Vesuvius in 79 AD?",
+    "Level": 1,
+    "Final answer": "Pompeii",
+    "file_name": "",
+    "file_path": "",
+    "Annotator Metadata": {
+      "Steps": 1,
+      "Number of tools": 1,
+      "Tools": ["Search"]
+    }
+  },
+  {
+    "task_id": "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+    "Question": "Who wrote the play 'Romeo and Juliet'?",
+    "Level": 1,
+    "Final answer": "William Shakespeare",
+    "file_name": "",
+    "file_path": "",
+    "Annotator Metadata": {
+      "Steps": 1,
+      "Number of tools": 1,
+      "Tools": ["Search"]
+    }
+  },
+  {
+    "task_id": "a1b2c3d4-e5f6-g7h8-i9j0-k1l2m3n4o5p6",
+    "Question": "What is the capital of Japan?",
+    "Level": 1,
+    "Final answer": "Tokyo",
+    "file_name": "",
+    "file_path": "",
+    "Annotator Metadata": {
+      "Steps": 1,
+      "Number of tools": 1,
+      "Tools": ["Search"]
+    }
+  },
+  {
+    "task_id": "z9y8x7w6-v5u4-t3s2-r1q0-p9o8n7m6l5k4",
+    "Question": "Which planet is known as the Red Planet and what is its largest moon?",
+    "Level": 2,
+    "Final answer": "Mars, Phobos",
+    "file_name": "",
+    "file_path": "",
+    "Annotator Metadata": {
+      "Steps": 2,
+      "Number of tools": 2,
+      "Tools": ["Search", "Search"]
+    }
+  },
+  {
+    "task_id": "m1n2b3v4-c5x6-z7a8-s9d0-f1g2h3j4k5l6",
+    "Question": "If the freezing point of water is 0 degrees Celsius, what is it in Fahrenheit? And what year was the Fahrenheit scale proposed?",
+    "Level": 2,
+    "Final answer": "32, 1724",
+    "file_name": "",
+    "file_path": "",
+    "Annotator Metadata": {
+      "Steps": 2,
+      "Number of tools": 2,
+      "Tools": ["Calculator", "Search"]
+    }
+  }
+]

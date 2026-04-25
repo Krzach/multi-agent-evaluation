@@ -143,6 +143,8 @@ class CommanderWriterSafeguardSystem:
             "You are the Commander. Step 2 of the workflow: pass the user's question to the "
             "Writer agent. Produce clear instructions the Writer should follow (assumptions, "
             "deliverable: executable Python when coding is needed). Include relevant memory. "
+            "If the user asks for a script to print a specific value, instruct the Writer to "
+            "make sure the script prints EXACTLY the final answer without any additional text, labels, or formatting.\n"
             "Plain text only."
         )
         human = f"User query:\n{state['user_query']}\n\nPrior interaction memory:\n{memory_text}"
@@ -250,8 +252,11 @@ class CommanderWriterSafeguardSystem:
     def _commander_decide_execution(self, state: WorkflowState) -> WorkflowState:
         system = (
             "You are the Commander. After Safeguard clearance, decide whether running the Writer's "
-            "code is required to answer the user (e.g. optimization/numeric result). "
-            'Return strict JSON: {"requires_execution": true|false, "rationale": string}.'
+            "code is required to answer the user.\n"
+            "CRITICAL: If the user explicitly asks for a script to 'calculate', 'read a file', 'print a result', "
+            "or execute any logic, execution IS REQUIRED. "
+            "Only skip execution if the user purely wants to read the source code and does not care about the output.\n"
+            "Return strict JSON: {\"requires_execution\": true|false, \"rationale\": string}."
         )
         human = (
             f"User query:\n{state['user_query']}\n\n"
@@ -261,6 +266,7 @@ class CommanderWriterSafeguardSystem:
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
         parsed = safe_json_parse(to_text(getattr(response, "content", response)))
+        # Default to True (safe fallback for multi-agent code evaluation) if parsing fails.
         state["requires_execution"] = bool(parsed.get("requires_execution", True))
         return state
 

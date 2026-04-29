@@ -46,6 +46,7 @@ class MultiAgentBenchRunner(BenchmarkRunner):
             attempts = mas_output.get("attempt", 0)
             safeguard_allowed = mas_output.get("safeguard_allowed", True)
             token_usage = mas_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            conversation_log_path = mas_output.get("conversation_log_path")
             
             # Calculate Conversation Turns / Messages between agents
             # Based on workflow.md and langchain_mas.py:
@@ -91,6 +92,7 @@ class MultiAgentBenchRunner(BenchmarkRunner):
                 "prompt": prompt,
                 "final_answer": final_answer,
                 "execution_output": execution_output,
+                "conversation_log_path": conversation_log_path,
                 
                 # Qualitative Metrics
                 "correctness": 1.0 if is_correct else 0.0,

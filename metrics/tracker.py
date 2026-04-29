@@ -1,4 +1,6 @@
 import time
+import json
+from pathlib import Path
 from typing import Dict, Any, Callable
 from .cost import CostTracker
 from .time import TimeTracker
@@ -81,6 +83,37 @@ class MetricsTracker:
         """
         # Conceptual implementation for SpadeLLM tracking.
         pass
+
+    def summarize_conversation_log(self, log_path: str) -> Dict[str, Any]:
+        """Summarize a MAS conversation log JSONL file for collaboration metrics."""
+        path = Path(log_path)
+        if not path.exists():
+            return {
+                "log_path": log_path,
+                "exists": False,
+                "total_events": 0,
+                "agent_outputs": 0,
+                "passes": 0,
+                "actions": 0,
+                "errors": 0,
+            }
+
+        records = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+
+        event_records = [r for r in records if r.get("record_type") == "event"]
+        return {
+            "log_path": str(path),
+            "exists": True,
+            "total_records": len(records),
+            "total_events": len(event_records),
+            "agent_outputs": sum(1 for r in event_records if r.get("event_type") == "agent_output"),
+            "passes": sum(1 for r in event_records if r.get("event_type") == "pass"),
+            "actions": sum(1 for r in event_records if r.get("event_type") == "action"),
+            "errors": sum(1 for r in event_records if r.get("event_type") == "error"),
+        }
         
     def get_summary(self) -> Dict[str, Any]:
         return {

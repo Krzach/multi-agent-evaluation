@@ -1,19 +1,12 @@
 import logging
 import time
 from typing import List, Dict, Any
-
-class MultiAgentBenchRunner:
+from benchmarks.base import BenchmarkRunner
+class MultiAgentBenchRunner(BenchmarkRunner):
     """
     Integrates MultiAgentBench to evaluate the multi-agent coding framework.
     """
-    def __init__(self, mas_instance):
-        """
-        Args:
-            mas_instance: An instance of a multi-agent system, 
-            e.g. CommanderWriterSafeguardSystem from coding_scenario.langchain_mas
-        """
-        self.mas = mas_instance
-        self.logger = logging.getLogger(__name__)
+
 
     def evaluate(self, dataset: List[Dict[str, Any]]):
         """

@@ -16,14 +16,13 @@ Steps 3–6 may repeat until resolution or max iterations (stand-in for timeout)
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, TypedDict
+from typing import Any, Dict
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from langchain_core.callbacks import BaseCallbackHandler
-
+from coding_scenario.base import CodingMASBase
 from utils import (
     extract_code,
     execute_python,
@@ -31,53 +30,15 @@ from utils import (
     safe_json_parse,
     to_text,
 )
+from .base import TokenTrackingCallback, WorkflowState
 
 load_dotenv()
 
 
-class WorkflowState(TypedDict):
-    user_query: str
-    memory: List[str]
-    max_iterations: int
-    attempt: int
-    commander_context: str
-    writer_code: str
-    writer_notes: str
-    safeguard_allowed: bool
-    safeguard_reason: str
-    requires_execution: bool
-    execution_output: str
-    execution_error: str
-    writer_interpretation: str
-    final_answer: str
-    finished: bool
-
-
-class TokenTrackingCallback(BaseCallbackHandler):
-    """Callback to track token usage across all LLM calls."""
-    def __init__(self):
-        self.total_tokens = 0
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
-        if response.llm_output and 'token_usage' in response.llm_output:
-            usage = response.llm_output['token_usage']
-            self.total_tokens += usage.get('total_tokens', 0)
-            self.prompt_tokens += usage.get('prompt_tokens', 0)
-            self.completion_tokens += usage.get('completion_tokens', 0)
-
-
-class CommanderWriterSafeguardSystem:
+class LangchainCodingMAS(CodingMASBase):
     def __init__(self, model_id: str, max_iterations: int) -> None:
-        self.model_id = model_id
-        self.max_iterations = max_iterations
-        self.memory: List[str] = []
-        
-        # Initialize token tracker
+        super().__init__(model_id, max_iterations)
         self.token_tracker = TokenTrackingCallback()
-        
-        # Pass the callback to each LLM instance
         self.commander_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
         self.writer_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
         self.safeguard_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
@@ -187,7 +148,10 @@ class CommanderWriterSafeguardSystem:
         writer_prompt = (
             "You are the Writer: you combine Coder and Interpreter. "
             "In this step you act only as Coder: produce executable Python for the Commander's "
-            "instructions and the user query. Use simple built-ins; print a concise result summary. "
+            "instructions and the user query. "
+            "If the request is a code-completion benchmark task, return only the function body/completion "
+            "without markdown, explanations, or extra wrapper code. "
+            "Avoid adding print statements unless explicitly requested by the user. "
             "Return strict JSON with keys: code, notes."
         )
         human = (
@@ -278,6 +242,13 @@ class CommanderWriterSafeguardSystem:
 
     # --- Step 7 (part): Commander decides whether execution is required ---
     def _commander_decide_execution(self, state: WorkflowState) -> WorkflowState:
+        query = state["user_query"]
+        if "Complete the following Python code" in query:
+            # HumanEval-style prompts are completion tasks where code can be non-standalone.
+            # Let the benchmark harness execute the completion with tests.
+            state["requires_execution"] = False
+            return state
+
         system = (
             "You are the Commander. After Safeguard clearance, decide whether running the Writer's "
             "code is required to answer the user.\n"
@@ -287,7 +258,7 @@ class CommanderWriterSafeguardSystem:
             "Return strict JSON: {\"requires_execution\": true|false, \"rationale\": string}."
         )
         human = (
-            f"User query:\n{state['user_query']}\n\n"
+            f"User query:\n{query}\n\n"
             f"Writer code:\n```python\n{state['writer_code']}\n```"
         )
         response = self.commander_llm.invoke(

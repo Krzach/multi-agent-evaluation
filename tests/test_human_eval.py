@@ -52,7 +52,7 @@ class TestHumanEval(unittest.TestCase):
         agent = LangGraphAgent(llm_model=llm, metrics_tracker=tracker)
         
         # 3. Run Evaluation
-        runner = HumanEvalRunner(agent_framework=agent)
+        runner = HumanEvalRunner(mas_instance=agent)
         results = runner.evaluate(dataset=mock_dataset)
         
         # 4. Assertions

@@ -1,14 +1,11 @@
 import logging
 from typing import List, Dict, Any
-
-class GaiaRunner:
+from benchmarks.base import BenchmarkRunner
+class GaiaRunner(BenchmarkRunner):
     """
     Integrates with MASEval to run the GAIA benchmark across different agent frameworks.
     """
-    def __init__(self, agent_framework):
-        self.agent = agent_framework
-        self.logger = logging.getLogger(__name__)
-        
+    
     def evaluate(self, dataset: List[Dict[str, Any]]):
         """
         Loops through the GAIA dataset, passes questions to the agent, 
@@ -21,7 +18,7 @@ class GaiaRunner:
             task_level = item.get('Level', 'Unknown')
             
             # Execute agent framework
-            output = self.agent.run_task(task_input=question)
+            output = self.mas.run_task(task_input=question)
             
             # For a real MASEval run, you would use maseval.evaluate() here.
             # This is a naive correctness check for demonstration.
@@ -36,7 +33,7 @@ class GaiaRunner:
                 "expected_answer": expected_answer,
                 "agent_response": output['response'],
                 "correctness": correctness_score,
-                "metrics": self.agent.metrics_tracker.get_summary() if self.agent.metrics_tracker else None
+                "metrics": self.mas.metrics_tracker.get_summary() if self.mas.metrics_tracker else None
             })
             
         return results

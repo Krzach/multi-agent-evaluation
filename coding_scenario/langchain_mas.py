@@ -38,11 +38,7 @@ load_dotenv()
 class LangchainCodingMAS(CodingMASBase):
     def __init__(self, model_id: str, max_iterations: int) -> None:
         super().__init__(model_id, max_iterations)
-
-        # Initialize token tracker
         self.token_tracker = TokenTrackingCallback()
-        
-        # Pass the callback to each LLM instance
         self.commander_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
         self.writer_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
         self.safeguard_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])

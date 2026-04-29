@@ -7,9 +7,6 @@ class HumanEvalRunner(BenchmarkRunner):
     """
     Integrates the HumanEval benchmark to evaluate coding tasks across different agent frameworks.
     """
-    def __init__(self, mas_instance: CodingMASBase):
-        self.mas = mas_instance
-        self.logger = logging.getLogger(__name__)
 
     def evaluate(self, dataset: List[Dict[str, Any]]):
         """

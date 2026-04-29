@@ -5,10 +5,7 @@ class GaiaRunner(BenchmarkRunner):
     """
     Integrates with MASEval to run the GAIA benchmark across different agent frameworks.
     """
-    def __init__(self, mas_instance: CodingMASBase):
-        self.mas = mas_instance
-        self.logger = logging.getLogger(__name__)
-        
+    
     def evaluate(self, dataset: List[Dict[str, Any]]):
         """
         Loops through the GAIA dataset, passes questions to the agent, 

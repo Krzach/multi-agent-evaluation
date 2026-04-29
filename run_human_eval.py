@@ -3,7 +3,7 @@ import json
 import argparse
 from dotenv import load_dotenv
 
-from coding_scenario.langchain_mas import CommanderWriterSafeguardSystem
+from coding_scenario.langchain_mas import LangchainCodingMAS
 from benchmarks.human_eval.dataset import HumanEvalDataset
 from benchmarks.human_eval.runner import HumanEvalRunner
 
@@ -56,11 +56,11 @@ def main():
     model_id = args.model
     max_iterations = args.max_iterations
     print(
-        f"Initializing CommanderWriterSafeguardSystem with model: {model_id} "
+        f"Initializing LangchainCodingMAS with model: {model_id} "
         f"(max iterations: {max_iterations})"
     )
     
-    agent = CommanderWriterSafeguardSystem(model_id=model_id, max_iterations=max_iterations)
+    agent = LangchainCodingMAS(model_id=model_id, max_iterations=max_iterations)
 
     # 3. Initialize the Runner
     runner = HumanEvalRunner(agent_framework=agent)

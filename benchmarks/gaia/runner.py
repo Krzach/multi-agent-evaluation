@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Any
-
-class GaiaRunner:
+from benchmarks.base import BenchmarkRunner
+class GaiaRunner(BenchmarkRunner):
     """
     Integrates with MASEval to run the GAIA benchmark across different agent frameworks.
     """

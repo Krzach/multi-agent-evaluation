@@ -16,14 +16,13 @@ Steps 3–6 may repeat until resolution or max iterations (stand-in for timeout)
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, TypedDict
+from typing import Any, Dict
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from langchain_core.callbacks import BaseCallbackHandler
-
+from coding_scenario.base import CodingMASBase
 from utils import (
     extract_code,
     execute_python,
@@ -31,49 +30,15 @@ from utils import (
     safe_json_parse,
     to_text,
 )
+from .base import TokenTrackingCallback, WorkflowState
 
 load_dotenv()
 
 
-class WorkflowState(TypedDict):
-    user_query: str
-    memory: List[str]
-    max_iterations: int
-    attempt: int
-    commander_context: str
-    writer_code: str
-    writer_notes: str
-    safeguard_allowed: bool
-    safeguard_reason: str
-    requires_execution: bool
-    execution_output: str
-    execution_error: str
-    writer_interpretation: str
-    final_answer: str
-    finished: bool
-
-
-class TokenTrackingCallback(BaseCallbackHandler):
-    """Callback to track token usage across all LLM calls."""
-    def __init__(self):
-        self.total_tokens = 0
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
-        if response.llm_output and 'token_usage' in response.llm_output:
-            usage = response.llm_output['token_usage']
-            self.total_tokens += usage.get('total_tokens', 0)
-            self.prompt_tokens += usage.get('prompt_tokens', 0)
-            self.completion_tokens += usage.get('completion_tokens', 0)
-
-
-class CommanderWriterSafeguardSystem:
+class LangchainCodingMAS(CodingMASBase):
     def __init__(self, model_id: str, max_iterations: int) -> None:
-        self.model_id = model_id
-        self.max_iterations = max_iterations
-        self.memory: List[str] = []
-        
+        super().__init__(model_id, max_iterations)
+
         # Initialize token tracker
         self.token_tracker = TokenTrackingCallback()
         

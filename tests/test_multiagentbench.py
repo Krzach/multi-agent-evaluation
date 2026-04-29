@@ -5,10 +5,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import unittest
 from benchmarks.multiagentbench.dataset import MultiAgentBenchDataset
 from benchmarks.multiagentbench.runner import MultiAgentBenchRunner
-from coding_scenario.langchain_mas import WorkflowState, CommanderWriterSafeguardSystem
+from coding_scenario.langchain_mas import WorkflowState, LangchainCodingMAS
 
 class MockMASSystem:
-    """Mock the CommanderWriterSafeguardSystem specifically to return outputs compatible with MAB assertions."""
+    """Mock the LangchainCodingMAS specifically to return outputs compatible with MAB assertions."""
     def answer(self, query):
         if "csv" in query.lower():
             output = "90.0"
@@ -51,7 +51,7 @@ class TestMultiAgentBench(unittest.TestCase):
         tasks = self.dataset.get_tasks()
         self.assertEqual(len(tasks), 4)
         
-        # 2. Setup Mock MAS (replace with CommanderWriterSafeguardSystem in production)
+        # 2. Setup Mock MAS (replace with LangchainCodingMAS in production)
         mock_mas = MockMASSystem()
         
         # 3. Setup Runner

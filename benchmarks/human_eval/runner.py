@@ -1,18 +1,19 @@
 import logging
 import time
 from typing import List, Dict, Any
-
-class HumanEvalRunner:
+from coding_scenario.base import CodingMASBase
+from benchmarks.base import BenchmarkRunner
+class HumanEvalRunner(BenchmarkRunner):
     """
     Integrates the HumanEval benchmark to evaluate coding tasks across different agent frameworks.
     """
-    def __init__(self, agent_framework):
-        self.agent = agent_framework
+    def __init__(self, mas_instance: CodingMASBase):
+        self.mas = mas_instance
         self.logger = logging.getLogger(__name__)
 
     def evaluate(self, dataset: List[Dict[str, Any]]):
         """
-        Loops through the HumanEval dataset, passes the prompt to the agent, 
+        Loops through the HumanEval dataset, passes the prompt to the MAS, 
         and evaluates the correctness by executing the test cases.
         """
         results = []
@@ -22,7 +23,7 @@ class HumanEvalRunner:
             test_code = item.get("test", "")
             entry_point = item.get("entry_point", "")
             
-            # The agent's task is to complete the code given the prompt
+            # The MAS's task is to complete the code given the prompt
             task_input = (
                 f"Complete the following Python code:\n\n{prompt}\n\n"
                 "Only output the Python code that completes the function. "
@@ -32,21 +33,12 @@ class HumanEvalRunner:
             # Start timer for Total Task Completion Time
             start_time = time.time()
             
-            # Execute agent framework
-            # We call the `answer` method to hook directly into the CommanderWriterSafeguardSystem
-            if hasattr(self.agent, 'answer'):
-                mas_output = self.agent.answer(task_input)
-                generated_code = mas_output.get("writer_code", "")
-                attempts = mas_output.get("attempt", 0)
-                safeguard_allowed = mas_output.get("safeguard_allowed", True)
-                token_usage = mas_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0})
-            else:
-                # Fallback for generic agents (e.g. MWE LangGraph setup)
-                mas_output = self.agent.run_task(task_input=task_input)
-                generated_code = mas_output.get('response', '')
-                attempts = 0
-                safeguard_allowed = True
-                token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+            # Execute MAS
+            mas_output = self.mas.answer(task_input)
+            generated_code = mas_output.get("writer_code", "")
+            attempts = mas_output.get("attempt", 0)
+            safeguard_allowed = mas_output.get("safeguard_allowed", True)
+            token_usage = mas_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0})
             
             # End timer
             end_time = time.time()
@@ -106,7 +98,7 @@ class HumanEvalRunner:
                 "collaboration_metrics": {
                     "conversation_iterations": attempts,
                     "messages_between_agents": total_messages,
-                    "activated_agents": 3 if hasattr(self.agent, 'answer') else 1, 
+                    "activated_agents": 3, 
                     "safeguard_blocked": not safeguard_allowed
                 }
             })

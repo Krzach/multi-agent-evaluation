@@ -2,7 +2,7 @@ import os
 import json
 from dotenv import load_dotenv
 
-from coding_scenario.langchain_mas import CommanderWriterSafeguardSystem
+from coding_scenario.langchain_mas import LangchainCodingMAS
 from benchmarks.multiagentbench.dataset import MultiAgentBenchDataset
 from benchmarks.multiagentbench.runner import MultiAgentBenchRunner
 
@@ -28,9 +28,9 @@ def main():
     # You can change the model_id to "gpt-4" or others if you prefer
     model_id = "gpt-4o-mini" 
     max_iterations = 3
-    print(f"Initializing CommanderWriterSafeguardSystem with model: {model_id} (max iterations: {max_iterations})")
+    print(f"Initializing LangchainCodingMAS with model: {model_id} (max iterations: {max_iterations})")
     
-    agent = CommanderWriterSafeguardSystem(model_id=model_id, max_iterations=max_iterations)
+    agent = LangchainCodingMAS(model_id=model_id, max_iterations=max_iterations)
 
     # 3. Initialize the Runner
     runner = MultiAgentBenchRunner(mas_instance=agent)

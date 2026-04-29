@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
+from langchain_core.callbacks import BaseCallbackHandler
 
 from utils import (
     extract_code,
@@ -52,14 +53,35 @@ class WorkflowState(TypedDict):
     finished: bool
 
 
+class TokenTrackingCallback(BaseCallbackHandler):
+    """Callback to track token usage across all LLM calls."""
+    def __init__(self):
+        self.total_tokens = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
+        if response.llm_output and 'token_usage' in response.llm_output:
+            usage = response.llm_output['token_usage']
+            self.total_tokens += usage.get('total_tokens', 0)
+            self.prompt_tokens += usage.get('prompt_tokens', 0)
+            self.completion_tokens += usage.get('completion_tokens', 0)
+
+
 class CommanderWriterSafeguardSystem:
     def __init__(self, model_id: str, max_iterations: int) -> None:
         self.model_id = model_id
         self.max_iterations = max_iterations
         self.memory: List[str] = []
-        self.commander_llm = ChatOpenAI(model=model_id, temperature=0)
-        self.writer_llm = ChatOpenAI(model=model_id, temperature=0)
-        self.safeguard_llm = ChatOpenAI(model=model_id, temperature=0)
+        
+        # Initialize token tracker
+        self.token_tracker = TokenTrackingCallback()
+        
+        # Pass the callback to each LLM instance
+        self.commander_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
+        self.writer_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
+        self.safeguard_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
+        
         self.graph = self._build_graph()
 
     def _build_graph(self) -> Any:
@@ -126,6 +148,12 @@ class CommanderWriterSafeguardSystem:
         graph.add_edge("commander_conclude", END)
         return graph.compile()
 
+    def reset_token_counts(self):
+        """Reset the token tracker counts for a new task."""
+        self.token_tracker.total_tokens = 0
+        self.token_tracker.prompt_tokens = 0
+        self.token_tracker.completion_tokens = 0
+
     # --- Step 1: task from user received by Commander ---
     def _commander_receive_task(self, state: WorkflowState) -> WorkflowState:
         state["execution_output"] = ""
@@ -143,6 +171,8 @@ class CommanderWriterSafeguardSystem:
             "You are the Commander. Step 2 of the workflow: pass the user's question to the "
             "Writer agent. Produce clear instructions the Writer should follow (assumptions, "
             "deliverable: executable Python when coding is needed). Include relevant memory. "
+            "If the user asks for a script to print a specific value, instruct the Writer to "
+            "make sure the script prints EXACTLY the final answer without any additional text, labels, or formatting.\n"
             "Plain text only."
         )
         human = f"User query:\n{state['user_query']}\n\nPrior interaction memory:\n{memory_text}"
@@ -250,8 +280,11 @@ class CommanderWriterSafeguardSystem:
     def _commander_decide_execution(self, state: WorkflowState) -> WorkflowState:
         system = (
             "You are the Commander. After Safeguard clearance, decide whether running the Writer's "
-            "code is required to answer the user (e.g. optimization/numeric result). "
-            'Return strict JSON: {"requires_execution": true|false, "rationale": string}.'
+            "code is required to answer the user.\n"
+            "CRITICAL: If the user explicitly asks for a script to 'calculate', 'read a file', 'print a result', "
+            "or execute any logic, execution IS REQUIRED. "
+            "Only skip execution if the user purely wants to read the source code and does not care about the output.\n"
+            "Return strict JSON: {\"requires_execution\": true|false, \"rationale\": string}."
         )
         human = (
             f"User query:\n{state['user_query']}\n\n"
@@ -261,6 +294,7 @@ class CommanderWriterSafeguardSystem:
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
         parsed = safe_json_parse(to_text(getattr(response, "content", response)))
+        # Default to True (safe fallback for multi-agent code evaluation) if parsing fails.
         state["requires_execution"] = bool(parsed.get("requires_execution", True))
         return state
 
@@ -358,6 +392,7 @@ class CommanderWriterSafeguardSystem:
         return state
 
     def answer(self, query: str) -> Dict[str, Any]:
+        self.reset_token_counts()
         start_state: WorkflowState = {
             "user_query": query,
             "memory": self.memory.copy(),
@@ -375,4 +410,13 @@ class CommanderWriterSafeguardSystem:
             "final_answer": "",
             "finished": False,
         }
-        return self.graph.invoke(start_state)
+        state_output = self.graph.invoke(start_state)
+        
+        # Inject token usage directly into the output dictionary for easy access by runners
+        state_output["token_usage"] = {
+            "total_tokens": self.token_tracker.total_tokens,
+            "prompt_tokens": self.token_tracker.prompt_tokens,
+            "completion_tokens": self.token_tracker.completion_tokens
+        }
+        
+        return state_output

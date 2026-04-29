@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": "mab_001",
+    "dataset": "MultiAgentBench",
+    "split": "test",
+    "prompt": "Write a Python script that reads a CSV file named 'data.csv', calculates the average of the 'score' column, and prints the result. Do not use pandas, use the built-in csv module.",
+    "expected_behavior": "The script should output the numerical average of the scores.",
+    "test_setup_code": "import csv\nwith open('data.csv', 'w', newline='') as f:\n    writer = csv.writer(f)\n    writer.writerow(['name', 'score'])\n    writer.writerow(['Alice', 85])\n    writer.writerow(['Bob', 90])\n    writer.writerow(['Charlie', 95])\n",
+    "test_teardown_code": "import os\nif os.path.exists('data.csv'):\n    os.remove('data.csv')",
+    "test_assertion": "str(float(output.strip().split()[-1])) == '90.0' if output.strip().split() else False"
+  },
+  {
+    "task_id": "mab_002",
+    "dataset": "MultiAgentBench",
+    "split": "test",
+    "prompt": "Create a function called 'is_palindrome' that takes a string and returns True if it's a palindrome and False otherwise. Ignore spaces and case. Then, write a script that calls this function with 'A man a plan a canal Panama' and prints the result.",
+    "expected_behavior": "The script should output 'True'.",
+    "test_setup_code": "",
+    "test_teardown_code": "",
+    "test_assertion": "'True' in output"
+  },
+  {
+    "task_id": "mab_003",
+    "dataset": "MultiAgentBench",
+    "split": "test",
+    "prompt": "Write a script to generate the first 10 numbers of the Fibonacci sequence, separated by commas. Print the result.",
+    "expected_behavior": "The script should output '0, 1, 1, 2, 3, 5, 8, 13, 21, 34'.",
+    "test_setup_code": "",
+    "test_teardown_code": "",
+    "test_assertion": "output.replace(' ', '').strip() == '0,1,1,2,3,5,8,13,21,34'"
+  },
+  {
+    "task_id": "mab_004",
+    "dataset": "MultiAgentBench",
+    "split": "test",
+    "prompt": "Write a Python script that creates a dictionary counting the frequency of each letter in the string 'hello world'. Print the frequency of the letter 'l'.",
+    "expected_behavior": "The script should output '3'.",
+    "test_setup_code": "",
+    "test_teardown_code": "",
+    "test_assertion": "output.strip().split()[-1] == '3' if output.strip().split() else False"
+  }
+]

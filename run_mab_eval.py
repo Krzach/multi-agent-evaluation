@@ -26,7 +26,7 @@ def main():
 
     # 2. Initialize the real Agent System
     # You can change the model_id to "gpt-4" or others if you prefer
-    model_id = "gpt-4o-mini" 
+    model_id = "gpt-5.4" 
     max_iterations = 3
     print(f"Initializing LangchainCodingMAS with model: {model_id} (max iterations: {max_iterations})")
     

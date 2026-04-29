@@ -9,7 +9,7 @@ from benchmarks.human_eval.runner import HumanEvalRunner
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run HumanEval on LangChain MAS.")
-    parser.add_argument("--model", default="gpt-4o-mini", help="Model id to use.")
+    parser.add_argument("--model", default="gpt-5.4", help="Model id to use.")
     parser.add_argument(
         "--max-iterations",
         type=int,
@@ -60,10 +60,10 @@ def main():
         f"(max iterations: {max_iterations})"
     )
     
-    agent = LangchainCodingMAS(model_id=model_id, max_iterations=max_iterations)
+    mas = LangchainCodingMAS(model_id=model_id, max_iterations=max_iterations)
 
     # 3. Initialize the Runner
-    runner = HumanEvalRunner(agent_framework=agent)
+    runner = HumanEvalRunner(mas_instance=mas)
 
     # 4. Run the Evaluation
     print("Starting evaluation (this may take a few minutes)...")

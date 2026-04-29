@@ -123,6 +123,11 @@ class LangchainCodingMAS(CodingMASBase):
         state["safeguard_allowed"] = False
         state["safeguard_reason"] = ""
         state["requires_execution"] = True
+        self.log_conversation_event(
+            event_type="action",
+            actor="Commander",
+            payload={"step": "receive_task", "attempt": state.get("attempt", 0)},
+        )
         return state
 
     # --- Step 2: Commander passes the question to Writer ---
@@ -141,6 +146,15 @@ class LangchainCodingMAS(CodingMASBase):
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
         state["commander_context"] = to_text(getattr(response, "content", response))
+        self.log_conversation_event(
+            event_type="pass",
+            actor="Commander",
+            target="Writer",
+            payload={
+                "step": "pass_to_writer",
+                "commander_context": state["commander_context"],
+            },
+        )
         return state
 
     # --- Step 3: Writer generates code and passes it to Commander (state holds code) ---
@@ -168,6 +182,16 @@ class LangchainCodingMAS(CodingMASBase):
             code = "print('Unable to generate valid code for this query.')"
         state["writer_code"] = code
         state["writer_notes"] = str(parsed.get("notes", "No additional notes."))
+        self.log_conversation_event(
+            event_type="agent_output",
+            actor="Writer",
+            target="Commander",
+            payload={
+                "step": "generate_code",
+                "writer_notes": state["writer_notes"],
+                "writer_code": state["writer_code"],
+            },
+        )
         return state
 
     # --- Step 3 (cont.): Commander receives code from Writer before Safeguard ---
@@ -175,6 +199,15 @@ class LangchainCodingMAS(CodingMASBase):
         # Commander holds writer_code for the Safeguard step; clear stale run artifacts.
         state["execution_output"] = ""
         state["execution_error"] = ""
+        self.log_conversation_event(
+            event_type="pass",
+            actor="Commander",
+            target="Safeguard",
+            payload={
+                "step": "send_code_to_safeguard",
+                "writer_code": state.get("writer_code", ""),
+            },
+        )
         return state
 
     # --- Steps 4–5: Commander communicates with Safeguard; clearance returns to Commander ---
@@ -184,6 +217,16 @@ class LangchainCodingMAS(CodingMASBase):
         if not allowed:
             state["safeguard_allowed"] = False
             state["safeguard_reason"] = reason
+            self.log_conversation_event(
+                event_type="agent_output",
+                actor="Safeguard",
+                target="Commander",
+                payload={
+                    "step": "safeguard_rule_block",
+                    "allow": False,
+                    "reason": reason,
+                },
+            )
             return state
 
         system = (
@@ -201,6 +244,16 @@ class LangchainCodingMAS(CodingMASBase):
         parsed = safe_json_parse(to_text(getattr(response, "content", response)))
         state["safeguard_allowed"] = bool(parsed.get("allow", False))
         state["safeguard_reason"] = str(parsed.get("reason", "No reason provided."))
+        self.log_conversation_event(
+            event_type="agent_output",
+            actor="Safeguard",
+            target="Commander",
+            payload={
+                "step": "safeguard_review",
+                "allow": state["safeguard_allowed"],
+                "reason": state["safeguard_reason"],
+            },
+        )
         return state
 
     def _route_after_safeguard(self, state: WorkflowState) -> str:
@@ -233,6 +286,16 @@ class LangchainCodingMAS(CodingMASBase):
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
         state["commander_context"] = to_text(getattr(response, "content", response))
+        self.log_conversation_event(
+            event_type="pass",
+            actor="Commander",
+            target="Writer",
+            payload={
+                "step": "redirect_writer",
+                "attempt": state["attempt"],
+                "redirect_context": state["commander_context"],
+            },
+        )
         state["writer_interpretation"] = ""
         state["safeguard_allowed"] = False
         state["safeguard_reason"] = ""
@@ -247,6 +310,15 @@ class LangchainCodingMAS(CodingMASBase):
             # HumanEval-style prompts are completion tasks where code can be non-standalone.
             # Let the benchmark harness execute the completion with tests.
             state["requires_execution"] = False
+            self.log_conversation_event(
+                event_type="action",
+                actor="Commander",
+                payload={
+                    "step": "decide_execution",
+                    "requires_execution": False,
+                    "reason": "humaneval_completion_prompt",
+                },
+            )
             return state
 
         system = (
@@ -267,6 +339,14 @@ class LangchainCodingMAS(CodingMASBase):
         parsed = safe_json_parse(to_text(getattr(response, "content", response)))
         # Default to True (safe fallback for multi-agent code evaluation) if parsing fails.
         state["requires_execution"] = bool(parsed.get("requires_execution", True))
+        self.log_conversation_event(
+            event_type="action",
+            actor="Commander",
+            payload={
+                "step": "decide_execution",
+                "requires_execution": state["requires_execution"],
+            },
+        )
         return state
 
     def _route_after_decide_execution(self, state: WorkflowState) -> str:
@@ -278,11 +358,25 @@ class LangchainCodingMAS(CodingMASBase):
         output, error = execute_python(state["writer_code"])
         state["execution_output"] = output
         state["execution_error"] = error
+        self.log_conversation_event(
+            event_type="action",
+            actor="Commander",
+            payload={
+                "step": "execute_code",
+                "execution_output": output,
+                "execution_error": error,
+            },
+        )
         return state
 
     def _commander_skip_execution(self, state: WorkflowState) -> WorkflowState:
         state["execution_output"] = "(Execution not run: Commander determined it was not required.)"
         state["execution_error"] = ""
+        self.log_conversation_event(
+            event_type="action",
+            actor="Commander",
+            payload={"step": "skip_execution"},
+        )
         return state
 
     # --- Step 7 (part): Writer interprets logs / provides the Writer-side answer ---
@@ -312,6 +406,15 @@ class LangchainCodingMAS(CodingMASBase):
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
         state["writer_interpretation"] = to_text(getattr(response, "content", response))
+        self.log_conversation_event(
+            event_type="agent_output",
+            actor="Writer",
+            target="Commander",
+            payload={
+                "step": "writer_interpret",
+                "writer_interpretation": state["writer_interpretation"],
+            },
+        )
         return state
 
     def _route_after_writer_interpret(self, state: WorkflowState) -> str:
@@ -359,11 +462,22 @@ class LangchainCodingMAS(CodingMASBase):
 
         state["final_answer"] = final
         state["finished"] = True
+        self.log_conversation_event(
+            event_type="final",
+            actor="Commander",
+            payload={
+                "step": "conclude",
+                "final_answer": final,
+                "safeguard_allowed": state.get("safeguard_allowed"),
+                "execution_error": state.get("execution_error", ""),
+            },
+        )
         self.memory.append(f"Q: {state['user_query']} | A: {final}")
         return state
 
     def answer(self, query: str) -> Dict[str, Any]:
         self.reset_token_counts()
+        self.begin_conversation_log(query)
         start_state: WorkflowState = {
             "user_query": query,
             "memory": self.memory.copy(),
@@ -389,5 +503,7 @@ class LangchainCodingMAS(CodingMASBase):
             "prompt_tokens": self.token_tracker.prompt_tokens,
             "completion_tokens": self.token_tracker.completion_tokens
         }
+        log_path = self.end_conversation_log(state_output.get("final_answer", ""))
+        state_output["conversation_log_path"] = log_path
         
         return state_output

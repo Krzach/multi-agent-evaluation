@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-agent-evaluation.local/schemas/conversation_log.schema.json",
+  "title": "CodingMAS Conversation Log Record",
+  "description": "Schema for one JSONL line in logs/mas_conversations/*.jsonl.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "record_type",
+        "session_id",
+        "timestamp",
+        "schema_version",
+        "framework",
+        "model_id",
+        "max_iterations",
+        "user_query"
+      ],
+      "properties": {
+        "record_type": { "const": "session_start" },
+        "session_id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "schema_version": { "type": "string" },
+        "framework": { "type": "string" },
+        "model_id": { "type": "string" },
+        "max_iterations": { "type": "integer", "minimum": 1 },
+        "user_query": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "record_type",
+        "schema_version",
+        "session_id",
+        "event_index",
+        "timestamp",
+        "event_type",
+        "actor",
+        "payload"
+      ],
+      "properties": {
+        "record_type": { "const": "event" },
+        "schema_version": { "type": "string" },
+        "session_id": { "type": "string" },
+        "event_index": { "type": "integer", "minimum": 1 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "event_type": {
+          "type": "string",
+          "enum": ["agent_output", "action", "pass", "state", "error", "final"]
+        },
+        "actor": { "type": "string" },
+        "target": { "type": ["string", "null"] },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "record_type",
+        "schema_version",
+        "session_id",
+        "timestamp",
+        "total_events",
+        "final_answer_preview"
+      ],
+      "properties": {
+        "record_type": { "const": "session_end" },
+        "schema_version": { "type": "string" },
+        "session_id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "total_events": { "type": "integer", "minimum": 0 },
+        "final_answer_preview": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

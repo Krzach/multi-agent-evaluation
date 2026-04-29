@@ -187,7 +187,10 @@ class CommanderWriterSafeguardSystem:
         writer_prompt = (
             "You are the Writer: you combine Coder and Interpreter. "
             "In this step you act only as Coder: produce executable Python for the Commander's "
-            "instructions and the user query. Use simple built-ins; print a concise result summary. "
+            "instructions and the user query. "
+            "If the request is a code-completion benchmark task, return only the function body/completion "
+            "without markdown, explanations, or extra wrapper code. "
+            "Avoid adding print statements unless explicitly requested by the user. "
             "Return strict JSON with keys: code, notes."
         )
         human = (
@@ -278,6 +281,13 @@ class CommanderWriterSafeguardSystem:
 
     # --- Step 7 (part): Commander decides whether execution is required ---
     def _commander_decide_execution(self, state: WorkflowState) -> WorkflowState:
+        query = state["user_query"]
+        if "Complete the following Python code" in query:
+            # HumanEval-style prompts are completion tasks where code can be non-standalone.
+            # Let the benchmark harness execute the completion with tests.
+            state["requires_execution"] = False
+            return state
+
         system = (
             "You are the Commander. After Safeguard clearance, decide whether running the Writer's "
             "code is required to answer the user.\n"
@@ -287,7 +297,7 @@ class CommanderWriterSafeguardSystem:
             "Return strict JSON: {\"requires_execution\": true|false, \"rationale\": string}."
         )
         human = (
-            f"User query:\n{state['user_query']}\n\n"
+            f"User query:\n{query}\n\n"
             f"Writer code:\n```python\n{state['writer_code']}\n```"
         )
         response = self.commander_llm.invoke(

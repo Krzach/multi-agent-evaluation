@@ -1,13 +1,37 @@
 import os
 import json
-import time
+import argparse
 from dotenv import load_dotenv
 
 from coding_scenario.langchain_mas import CommanderWriterSafeguardSystem
 from benchmarks.human_eval.dataset import HumanEvalDataset
 from benchmarks.human_eval.runner import HumanEvalRunner
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run HumanEval on LangChain MAS.")
+    parser.add_argument("--model", default="gpt-4o-mini", help="Model id to use.")
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=3,
+        help="Maximum retry iterations inside MAS workflow.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="How many HumanEval tasks to run (use 164 for full test split).",
+    )
+    parser.add_argument(
+        "--output",
+        default="humaneval_results.json",
+        help="Path to save evaluation results JSON.",
+    )
+    return parser.parse_args()
+
 def main():
+    args = parse_args()
+
     # Load environment variables (e.g., OPENAI_API_KEY)
     load_dotenv()
     
@@ -21,8 +45,7 @@ def main():
     # 1. Load the dataset (from huggingface datasets)
     try:
         dataset = HumanEvalDataset(split="test")
-        # We limit to 5 tasks for a quick test run. Remove limit to run all 164 tasks.
-        tasks = dataset.get_tasks(limit=5)
+        tasks = dataset.get_tasks(limit=args.limit)
         print(f"Loaded {len(tasks)} tasks from HumanEval.")
     except Exception as e:
         print(f"Failed to load dataset: {e}")
@@ -30,9 +53,12 @@ def main():
         return
 
     # 2. Initialize the real Agent System
-    model_id = "gpt-4o-mini" 
-    max_iterations = 3
-    print(f"Initializing CommanderWriterSafeguardSystem with model: {model_id} (max iterations: {max_iterations})")
+    model_id = args.model
+    max_iterations = args.max_iterations
+    print(
+        f"Initializing CommanderWriterSafeguardSystem with model: {model_id} "
+        f"(max iterations: {max_iterations})"
+    )
     
     agent = CommanderWriterSafeguardSystem(model_id=model_id, max_iterations=max_iterations)
 
@@ -93,8 +119,8 @@ def main():
     print(f"Average Messages per Task: {avg_messages:.1f}")
     
     # Save detailed results to a JSON file
-    output_file = "humaneval_results.json"
-    with open(output_file, "w") as f:
+    output_file = args.output
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
     print(f"\nDetailed results saved to {output_file}")
 

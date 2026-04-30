@@ -1,7 +1,7 @@
 import time
 import json
 from pathlib import Path
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
 from .cost import CostTracker
 from .time import TimeTracker
 
@@ -83,6 +83,23 @@ class MetricsTracker:
         """
         # Conceptual implementation for SpadeLLM tracking.
         pass
+
+    def summarize_communication_overhead(
+        self,
+        log_path: Optional[str],
+        mas_task_seconds: float,
+        mas_token_usage: Dict[str, int],
+        baseline: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Full coordination + optional delta-vs-single-agent overhead (see metrics/communication_overhead)."""
+        from metrics.communication_overhead import compute_communication_overhead
+
+        return compute_communication_overhead(
+            log_path=log_path,
+            mas_task_seconds=mas_task_seconds,
+            mas_token_usage=mas_token_usage,
+            baseline=baseline,
+        )
 
     def summarize_conversation_log(self, log_path: str) -> Dict[str, Any]:
         """Summarize a MAS conversation log JSONL file for collaboration metrics."""

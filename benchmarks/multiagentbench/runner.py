@@ -1,16 +1,29 @@
 import logging
 import time
 from typing import List, Dict, Any
+
 from benchmarks.base import BenchmarkRunner
+from metrics.communication_overhead import build_overhead_envelope
+
+
 class MultiAgentBenchRunner(BenchmarkRunner):
     """
     Integrates MultiAgentBench to evaluate the multi-agent coding framework.
     """
 
 
-    def evaluate(self, dataset: List[Dict[str, Any]]):
+    def evaluate(
+        self,
+        dataset: List[Dict[str, Any]],
+        *,
+        include_delta_overhead: bool = False,
+    ):
         """
         Evaluates the MAS against a suite of tasks.
+
+        Args:
+            include_delta_overhead: If True, runs an extra single-agent LLM call per task
+                for delta overhead metrics (adds API cost/latency).
         """
         results = []
         for task in dataset:
@@ -31,9 +44,13 @@ class MultiAgentBenchRunner(BenchmarkRunner):
             # Start timer for Total Task Completion Time
             start_time = time.time()
             
-            # Step 2: Execute MAS 
+            # Step 2: Execute MAS
             # IMPORTANT: We explicitly ask the agent to execute the code
-            mas_output = self.mas.answer(prompt + "\n\nMake sure to execute the code and print the result. This is required.")
+            task_input = (
+                prompt
+                + "\n\nMake sure to execute the code and print the result. This is required."
+            )
+            mas_output = self.mas.answer(task_input)
             
             # End timer
             end_time = time.time()
@@ -45,9 +62,28 @@ class MultiAgentBenchRunner(BenchmarkRunner):
             execution_output = mas_output.get("execution_output", "")
             attempts = mas_output.get("attempt", 0)
             safeguard_allowed = mas_output.get("safeguard_allowed", True)
-            token_usage = mas_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            tu = mas_output.get("token_usage") or {}
+            token_usage = {
+                "prompt_tokens": int(tu.get("prompt_tokens", 0)),
+                "completion_tokens": int(tu.get("completion_tokens", 0)),
+                "total_tokens": int(
+                    tu.get(
+                        "total_tokens",
+                        int(tu.get("prompt_tokens", 0))
+                        + int(tu.get("completion_tokens", 0)),
+                    )
+                ),
+            }
             conversation_log_path = mas_output.get("conversation_log_path")
-            
+
+            communication_overhead_metrics = build_overhead_envelope(
+                self.mas,
+                task_input,
+                mas_output,
+                total_task_time,
+                include_delta_overhead=include_delta_overhead,
+            )
+
             # Calculate Conversation Turns / Messages between agents
             # Based on workflow.md and langchain_mas.py:
             # 1 iteration = Commander -> Writer (1) + Writer -> Commander (1) + Commander -> Safeguard (1) + Safeguard -> Commander (1)
@@ -93,16 +129,18 @@ class MultiAgentBenchRunner(BenchmarkRunner):
                 "final_answer": final_answer,
                 "execution_output": execution_output,
                 "conversation_log_path": conversation_log_path,
-                
+                "mas_framework": self.mas.__class__.__name__,
+                "communication_overhead_metrics": communication_overhead_metrics,
+
                 # Qualitative Metrics
                 "correctness": 1.0 if is_correct else 0.0,
                 "error": error_message,
                 
                 # Cost Metrics
                 "cost_metrics": {
-                    "input_tokens": token_usage.get("prompt_tokens", 0),
-                    "output_tokens": token_usage.get("completion_tokens", 0),
-                    "total_tokens": token_usage.get("total_tokens", 0)
+                    "input_tokens": token_usage["prompt_tokens"],
+                    "output_tokens": token_usage["completion_tokens"],
+                    "total_tokens": token_usage["total_tokens"],
                 },
                 
                 # Time Metrics

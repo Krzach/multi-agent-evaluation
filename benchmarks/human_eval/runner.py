@@ -1,17 +1,30 @@
 import logging
 import time
 from typing import List, Dict, Any
+
 from coding_scenario.base import CodingMASBase
 from benchmarks.base import BenchmarkRunner
+from metrics.communication_overhead import build_overhead_envelope
+
+
 class HumanEvalRunner(BenchmarkRunner):
     """
     Integrates the HumanEval benchmark to evaluate coding tasks across different agent frameworks.
     """
 
-    def evaluate(self, dataset: List[Dict[str, Any]]):
+    def evaluate(
+        self,
+        dataset: List[Dict[str, Any]],
+        *,
+        include_delta_overhead: bool = False,
+    ):
         """
-        Loops through the HumanEval dataset, passes the prompt to the MAS, 
+        Loops through the HumanEval dataset, passes the prompt to the MAS,
         and evaluates the correctness by executing the test cases.
+
+        Args:
+            include_delta_overhead: If True, runs an extra single-agent LLM call per task
+                to populate delta-vs-baseline overhead (adds API cost/latency).
         """
         results = []
         for item in dataset:
@@ -35,13 +48,32 @@ class HumanEvalRunner(BenchmarkRunner):
             generated_code = mas_output.get("writer_code", "")
             attempts = mas_output.get("attempt", 0)
             safeguard_allowed = mas_output.get("safeguard_allowed", True)
-            token_usage = mas_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0})
+            tu = mas_output.get("token_usage") or {}
+            token_usage = {
+                "prompt_tokens": int(tu.get("prompt_tokens", 0)),
+                "completion_tokens": int(tu.get("completion_tokens", 0)),
+                "total_tokens": int(
+                    tu.get(
+                        "total_tokens",
+                        int(tu.get("prompt_tokens", 0))
+                        + int(tu.get("completion_tokens", 0)),
+                    )
+                ),
+            }
             conversation_log_path = mas_output.get("conversation_log_path")
-            
+
             # End timer
             end_time = time.time()
             total_task_time = end_time - start_time
-            
+
+            communication_overhead_metrics = build_overhead_envelope(
+                self.mas,
+                task_input,
+                mas_output,
+                total_task_time,
+                include_delta_overhead=include_delta_overhead,
+            )
+
             # Calculate Collaboration Metrics
             messages_per_attempt = 4
             base_messages = 2 
@@ -76,16 +108,18 @@ class HumanEvalRunner(BenchmarkRunner):
                 "prompt": prompt,
                 "generated_code": clean_code,
                 "conversation_log_path": conversation_log_path,
-                
+                "mas_framework": self.mas.__class__.__name__,
+                "communication_overhead_metrics": communication_overhead_metrics,
+
                 # Qualitative Metrics
                 "correctness": 1.0 if is_correct else 0.0,
                 "error": error_message,
                 
                 # Cost Metrics
                 "cost_metrics": {
-                    "input_tokens": token_usage.get("prompt_tokens", 0),
-                    "output_tokens": token_usage.get("completion_tokens", 0),
-                    "total_tokens": token_usage.get("total_tokens", 0)
+                    "input_tokens": token_usage["prompt_tokens"],
+                    "output_tokens": token_usage["completion_tokens"],
+                    "total_tokens": token_usage["total_tokens"],
                 },
                 
                 # Time Metrics

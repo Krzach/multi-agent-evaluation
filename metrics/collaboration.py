@@ -1,9 +1,9 @@
 class CollaborationTracker:
     def __init__(self):
-        self.messages_between_agents = 0
-        self.conversation_turns = 0
-        self.activated_agents = set()
-        self.information_flow_depth = 0
+        self.messages_between_agents: int = 0
+        self.conversation_turns: int = 0
+        self.activated_agents: set[str] = set()
+        self.information_flow_depth: int = 0
         
     def add_message(self, sender: str, receiver: str):
         self.messages_between_agents += 1

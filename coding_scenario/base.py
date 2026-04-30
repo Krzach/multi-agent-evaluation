@@ -9,7 +9,43 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 from uuid import uuid4
 
-from langchain_core.callbacks import BaseCallbackHandler
+# --- Conversation log taxonomy (overhead attribution) ---
+
+Phase = Literal["coordination", "generation", "execution", "finalization"]
+
+PHASE_COORDINATION: Phase = "coordination"
+PHASE_GENERATION: Phase = "generation"
+PHASE_EXECUTION: Phase = "execution"
+PHASE_FINALIZATION: Phase = "finalization"
+
+# Stable event_name values shared across LangChain / AutoGen / mock SPADE
+EVENT_RECEIVE_TASK = "receive_task"
+EVENT_PASS_TO_WRITER = "pass_to_writer"
+EVENT_GENERATE_CODE = "generate_code"
+EVENT_SEND_CODE_TO_SAFEGUARD = "send_code_to_safeguard"
+EVENT_SAFEGUARD_RULE_BLOCK = "safeguard_rule_block"
+EVENT_SAFEGUARD_REVIEW = "safeguard_review"
+EVENT_REDIRECT_WRITER = "redirect_writer"
+EVENT_DECIDE_EXECUTION = "decide_execution"
+EVENT_EXECUTE_CODE = "execute_code"
+EVENT_SKIP_EXECUTION = "skip_execution"
+EVENT_WRITER_INTERPRET = "writer_interpret"
+EVENT_CONCLUDE = "conclude"
+
+
+def default_phase_for_event(
+    event_name: str, event_type: str, actor: str
+) -> Phase:
+    """Infer phase when caller does not set ``phase`` explicitly."""
+    if event_name in (EVENT_EXECUTE_CODE, EVENT_SKIP_EXECUTION):
+        return PHASE_EXECUTION
+    if event_name == EVENT_GENERATE_CODE or event_name == EVENT_WRITER_INTERPRET:
+        return PHASE_GENERATION
+    if event_name == EVENT_CONCLUDE:
+        return PHASE_FINALIZATION
+    if actor == "Writer" and event_type == "agent_output":
+        return PHASE_GENERATION
+    return PHASE_COORDINATION
 
 class CodingMASBase(ABC):
     """Abstract base for Commander–Writer–Safeguard style coding MAS implementations.
@@ -53,13 +89,41 @@ class CodingMASBase(ABC):
         self._log_event_index = 0
         self._log_path = log_dir / f"mas_conversation_{title_timestamp}_{self._log_session_id[:8]}.jsonl"
 
+        record: Dict[str, Any] = {
+            "record_type": "session_start",
+            "session_id": self._log_session_id,
+            "timestamp": timestamp.isoformat(),
+            "schema_version": "1.1.0",
+            "framework": self.__class__.__name__,
+            "framework_mode": "production",
+            "model_id": self.model_id,
+            "max_iterations": self.max_iterations,
+            "user_query": user_query,
+        }
+        self._write_log_line(record)
+        return str(self._log_path)
+
+    def begin_conversation_log_with_mode(
+        self, user_query: str, *, framework_mode: str = "production"
+    ) -> str:
+        """Like ``begin_conversation_log`` but records ``framework_mode`` (e.g. mock)."""
+        timestamp = datetime.now(timezone.utc)
+        title_timestamp = timestamp.strftime("%Y%m%d_%H%M%S")
+        log_dir = Path("logs") / "mas_conversations"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        self._log_session_id = str(uuid4())
+        self._log_event_index = 0
+        self._log_path = log_dir / f"mas_conversation_{title_timestamp}_{self._log_session_id[:8]}.jsonl"
+
         self._write_log_line(
             {
                 "record_type": "session_start",
                 "session_id": self._log_session_id,
                 "timestamp": timestamp.isoformat(),
-                "schema_version": "1.0.0",
+                "schema_version": "1.1.0",
                 "framework": self.__class__.__name__,
+                "framework_mode": framework_mode,
                 "model_id": self.model_id,
                 "max_iterations": self.max_iterations,
                 "user_query": user_query,
@@ -74,41 +138,69 @@ class CodingMASBase(ABC):
         actor: str,
         target: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
+        event_name: Optional[str] = None,
+        phase: Optional[Phase] = None,
+        duration_ms: Optional[float] = None,
+        token_usage: Optional[Dict[str, int]] = None,
     ) -> None:
         """Append one structured event into the active conversation log."""
         if self._log_path is None or self._log_session_id is None:
             return
 
-        self._log_event_index += 1
-        self._write_log_line(
-            {
-                "record_type": "event",
-                "schema_version": "1.0.0",
-                "session_id": self._log_session_id,
-                "event_index": self._log_event_index,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "event_type": event_type,
-                "actor": actor,
-                "target": target,
-                "payload": payload or {},
-            }
-        )
+        resolved_name = event_name or (payload or {}).get("step")
+        resolved_phase = phase
+        if resolved_phase is None and isinstance(resolved_name, str):
+            resolved_phase = default_phase_for_event(
+                resolved_name, event_type, actor
+            )
 
-    def end_conversation_log(self, final_answer: str) -> Optional[str]:
+        self._log_event_index += 1
+        event_record: Dict[str, Any] = {
+            "record_type": "event",
+            "schema_version": "1.1.0",
+            "session_id": self._log_session_id,
+            "event_index": self._log_event_index,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": event_type,
+            "actor": actor,
+            "target": target,
+            "payload": payload or {},
+        }
+        if isinstance(resolved_name, str) and resolved_name:
+            event_record["event_name"] = resolved_name
+        if resolved_phase is not None:
+            event_record["phase"] = resolved_phase
+        if duration_ms is not None:
+            event_record["duration_ms"] = duration_ms
+        if token_usage is not None:
+            event_record["token_usage"] = {
+                "prompt_tokens": int(token_usage.get("prompt_tokens", 0)),
+                "completion_tokens": int(token_usage.get("completion_tokens", 0)),
+                "total_tokens": int(token_usage.get("total_tokens", 0)),
+            }
+        self._write_log_line(event_record)
+
+    def end_conversation_log(
+        self,
+        final_answer: str,
+        *,
+        mas_total_duration_ms: Optional[float] = None,
+    ) -> Optional[str]:
         """Close the current conversation log session."""
         if self._log_path is None or self._log_session_id is None:
             return None
 
-        self._write_log_line(
-            {
-                "record_type": "session_end",
-                "schema_version": "1.0.0",
-                "session_id": self._log_session_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "total_events": self._log_event_index,
-                "final_answer_preview": final_answer[:500],
-            }
-        )
+        end_rec: Dict[str, Any] = {
+            "record_type": "session_end",
+            "schema_version": "1.1.0",
+            "session_id": self._log_session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_events": self._log_event_index,
+            "final_answer_preview": final_answer[:500],
+        }
+        if mas_total_duration_ms is not None:
+            end_rec["mas_total_duration_ms"] = mas_total_duration_ms
+        self._write_log_line(end_rec)
         return str(self._log_path)
 
     def load_conversation_log(self, path: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -128,20 +220,6 @@ class CodingMASBase(ABC):
             return
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=True) + "\n")
-
-class TokenTrackingCallback(BaseCallbackHandler):
-    """Callback to track token usage across all LLM calls."""
-    def __init__(self):
-        self.total_tokens = 0
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
-        if response.llm_output and 'token_usage' in response.llm_output:
-            usage = response.llm_output['token_usage']
-            self.total_tokens += usage.get('total_tokens', 0)
-            self.prompt_tokens += usage.get('prompt_tokens', 0)
-            self.completion_tokens += usage.get('completion_tokens', 0)
 
 class WorkflowState(TypedDict):
     user_query: str

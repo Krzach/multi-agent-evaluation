@@ -2,7 +2,7 @@ import os
 import json
 from dotenv import load_dotenv
 
-from coding_scenario.langchain_mas import LangchainCodingMAS
+from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
 from benchmarks.multiagentbench.dataset import MultiAgentBenchDataset
 from benchmarks.multiagentbench.runner import MultiAgentBenchRunner
 

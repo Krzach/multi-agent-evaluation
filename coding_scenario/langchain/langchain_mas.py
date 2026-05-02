@@ -12,17 +12,41 @@ Numbered flow (coding_workflow.md):
 8. Commander furnishes the user with the concluding answer
 
 Steps 3–6 may repeat until resolution or max iterations (stand-in for timeout).
+
+Each ``log_conversation_event`` sets ``actor`` to ``Commander``, ``Writer``, or ``Safeguard`` so
+``metrics/conversation_log_metrics`` can sum **time outside the LLM call** vs **LLM API**
+milliseconds per agent (``duration_ms`` minus ``llm_api_duration_ms`` when the latter is set).
+``phase`` remains a workflow hint in the log; aggregates use ``actor``, not ``phase``.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from coding_scenario.base import CodingMASBase
+from coding_scenario.base import (
+    CodingMASBase,
+    EVENT_CONCLUDE,
+    EVENT_DECIDE_EXECUTION,
+    EVENT_EXECUTE_CODE,
+    EVENT_GENERATE_CODE,
+    EVENT_PASS_TO_WRITER,
+    EVENT_RECEIVE_TASK,
+    EVENT_REDIRECT_WRITER,
+    EVENT_SAFEGUARD_REVIEW,
+    EVENT_SAFEGUARD_RULE_BLOCK,
+    EVENT_SEND_CODE_TO_SAFEGUARD,
+    EVENT_SKIP_EXECUTION,
+    EVENT_WRITER_INTERPRET,
+    PHASE_COORDINATION,
+    PHASE_EXECUTION,
+    PHASE_FINALIZATION,
+    PHASE_GENERATION,
+)
 from utils import (
     extract_code,
     execute_python,
@@ -30,7 +54,9 @@ from utils import (
     safe_json_parse,
     to_text,
 )
-from .base import TokenTrackingCallback, WorkflowState
+from coding_scenario.base import WorkflowState
+from coding_scenario.langchain.callbacks.time_between_nodes import TimeBetweenNodesCallback
+from coding_scenario.langchain.callbacks.token_tracking import TokenTrackingCallback
 
 load_dotenv()
 
@@ -38,12 +64,28 @@ load_dotenv()
 class LangchainCodingMAS(CodingMASBase):
     def __init__(self, model_id: str, max_iterations: int) -> None:
         super().__init__(model_id, max_iterations)
-        self.token_tracker = TokenTrackingCallback()
-        self.commander_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
-        self.writer_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
-        self.safeguard_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracker])
+        self.token_tracking_cb = TokenTrackingCallback()
+        self.time_between_nodes_cb = TimeBetweenNodesCallback()
+        self.commander_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracking_cb])
+        self.writer_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracking_cb])
+        self.safeguard_llm = ChatOpenAI(model=model_id, temperature=0, callbacks=[self.token_tracking_cb])
         
         self.graph = self._build_graph()
+
+    def _snapshot_tokens(self) -> Dict[str, int]:
+        return {
+            "prompt_tokens": self.token_tracking_cb.prompt_tokens,
+            "completion_tokens": self.token_tracking_cb.completion_tokens,
+            "total_tokens": self.token_tracking_cb.total_tokens,
+        }
+
+    def _token_delta(self, before: Dict[str, int]) -> Dict[str, int]:
+        after = self._snapshot_tokens()
+        return {
+            "prompt_tokens": after["prompt_tokens"] - before["prompt_tokens"],
+            "completion_tokens": after["completion_tokens"] - before["completion_tokens"],
+            "total_tokens": after["total_tokens"] - before["total_tokens"],
+        }
 
     def _build_graph(self) -> Any:
         graph = StateGraph(WorkflowState)
@@ -111,27 +153,33 @@ class LangchainCodingMAS(CodingMASBase):
 
     def reset_token_counts(self):
         """Reset the token tracker counts for a new task."""
-        self.token_tracker.total_tokens = 0
-        self.token_tracker.prompt_tokens = 0
-        self.token_tracker.completion_tokens = 0
+        self.token_tracking_cb.total_tokens = 0
+        self.token_tracking_cb.prompt_tokens = 0
+        self.token_tracking_cb.completion_tokens = 0
 
     # --- Step 1: task from user received by Commander ---
     def _commander_receive_task(self, state: WorkflowState) -> WorkflowState:
+        t0 = time.perf_counter()
         state["execution_output"] = ""
         state["execution_error"] = ""
         state["writer_interpretation"] = ""
         state["safeguard_allowed"] = False
         state["safeguard_reason"] = ""
         state["requires_execution"] = True
+        dur_ms = (time.perf_counter() - t0) * 1000.0
         self.log_conversation_event(
             event_type="action",
             actor="Commander",
-            payload={"step": "receive_task", "attempt": state.get("attempt", 0)},
+            event_name=EVENT_RECEIVE_TASK,
+            phase=PHASE_COORDINATION,
+            duration_ms=dur_ms,
+            payload={"step": EVENT_RECEIVE_TASK, "attempt": state.get("attempt", 0)},
         )
         return state
 
     # --- Step 2: Commander passes the question to Writer ---
     def _commander_pass_to_writer(self, state: WorkflowState) -> WorkflowState:
+        t_node = time.perf_counter()
         memory_text = "\n".join(f"- {item}" for item in state["memory"][-5:]) or "(none)"
         system = (
             "You are the Commander. Step 2 of the workflow: pass the user's question to the "
@@ -142,16 +190,25 @@ class LangchainCodingMAS(CodingMASBase):
             "Plain text only."
         )
         human = f"User query:\n{state['user_query']}\n\nPrior interaction memory:\n{memory_text}"
+        tok_before = self._snapshot_tokens()
+        t_llm = time.perf_counter()
         response = self.commander_llm.invoke(
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
+        llm_ms = (time.perf_counter() - t_llm) * 1000.0
         state["commander_context"] = to_text(getattr(response, "content", response))
+        node_ms = (time.perf_counter() - t_node) * 1000.0
         self.log_conversation_event(
             event_type="pass",
             actor="Commander",
             target="Writer",
+            event_name=EVENT_PASS_TO_WRITER,
+            phase=PHASE_COORDINATION,
+            duration_ms=node_ms,
+            llm_api_duration_ms=llm_ms,
+            token_usage=self._token_delta(tok_before),
             payload={
-                "step": "pass_to_writer",
+                "step": EVENT_PASS_TO_WRITER,
                 "commander_context": state["commander_context"],
             },
         )
@@ -159,6 +216,7 @@ class LangchainCodingMAS(CodingMASBase):
 
     # --- Step 3: Writer generates code and passes it to Commander (state holds code) ---
     def _writer_generate_code(self, state: WorkflowState) -> WorkflowState:
+        t_node = time.perf_counter()
         writer_prompt = (
             "You are the Writer: you combine Coder and Interpreter. "
             "In this step you act only as Coder: produce executable Python for the Commander's "
@@ -173,21 +231,30 @@ class LangchainCodingMAS(CodingMASBase):
             f"Commander instructions (passed from Commander to you):\n{state['commander_context']}\n\n"
             "Return JSON only."
         )
+        tok_before = self._snapshot_tokens()
+        t_llm = time.perf_counter()
         response = self.writer_llm.invoke(
             [SystemMessage(content=writer_prompt), HumanMessage(content=human)]
         )
+        llm_ms = (time.perf_counter() - t_llm) * 1000.0
         parsed = safe_json_parse(to_text(getattr(response, "content", response)))
         code = extract_code(str(parsed.get("code", "")))
         if not code:
             code = "print('Unable to generate valid code for this query.')"
         state["writer_code"] = code
         state["writer_notes"] = str(parsed.get("notes", "No additional notes."))
+        node_ms = (time.perf_counter() - t_node) * 1000.0
         self.log_conversation_event(
             event_type="agent_output",
             actor="Writer",
             target="Commander",
+            event_name=EVENT_GENERATE_CODE,
+            phase=PHASE_GENERATION,
+            duration_ms=node_ms,
+            llm_api_duration_ms=llm_ms,
+            token_usage=self._token_delta(tok_before),
             payload={
-                "step": "generate_code",
+                "step": EVENT_GENERATE_CODE,
                 "writer_notes": state["writer_notes"],
                 "writer_code": state["writer_code"],
             },
@@ -197,14 +264,19 @@ class LangchainCodingMAS(CodingMASBase):
     # --- Step 3 (cont.): Commander receives code from Writer before Safeguard ---
     def _commander_receive_writer_code(self, state: WorkflowState) -> WorkflowState:
         # Commander holds writer_code for the Safeguard step; clear stale run artifacts.
+        t0 = time.perf_counter()
         state["execution_output"] = ""
         state["execution_error"] = ""
+        dur_ms = (time.perf_counter() - t0) * 1000.0
         self.log_conversation_event(
             event_type="pass",
             actor="Commander",
             target="Safeguard",
+            event_name=EVENT_SEND_CODE_TO_SAFEGUARD,
+            phase=PHASE_COORDINATION,
+            duration_ms=dur_ms,
             payload={
-                "step": "send_code_to_safeguard",
+                "step": EVENT_SEND_CODE_TO_SAFEGUARD,
                 "writer_code": state.get("writer_code", ""),
             },
         )
@@ -212,17 +284,23 @@ class LangchainCodingMAS(CodingMASBase):
 
     # --- Steps 4–5: Commander communicates with Safeguard; clearance returns to Commander ---
     def _safeguard(self, state: WorkflowState) -> WorkflowState:
+        t_node = time.perf_counter()
         code = state["writer_code"]
         allowed, reason = rule_based_safeguard(code)
         if not allowed:
+            t0 = time.perf_counter()
             state["safeguard_allowed"] = False
             state["safeguard_reason"] = reason
+            dur_ms = (time.perf_counter() - t0) * 1000.0
             self.log_conversation_event(
                 event_type="agent_output",
                 actor="Safeguard",
                 target="Commander",
+                event_name=EVENT_SAFEGUARD_RULE_BLOCK,
+                phase=PHASE_COORDINATION,
+                duration_ms=dur_ms,
                 payload={
-                    "step": "safeguard_rule_block",
+                    "step": EVENT_SAFEGUARD_RULE_BLOCK,
                     "allow": False,
                     "reason": reason,
                 },
@@ -238,18 +316,27 @@ class LangchainCodingMAS(CodingMASBase):
             f"Commander context (for awareness only):\n{state['commander_context'][:1200]}\n\n"
             f"Code to review:\n```python\n{code}\n```"
         )
+        tok_before = self._snapshot_tokens()
+        t_llm = time.perf_counter()
         response = self.safeguard_llm.invoke(
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
+        llm_ms = (time.perf_counter() - t_llm) * 1000.0
         parsed = safe_json_parse(to_text(getattr(response, "content", response)))
         state["safeguard_allowed"] = bool(parsed.get("allow", False))
         state["safeguard_reason"] = str(parsed.get("reason", "No reason provided."))
+        node_ms = (time.perf_counter() - t_node) * 1000.0
         self.log_conversation_event(
             event_type="agent_output",
             actor="Safeguard",
             target="Commander",
+            event_name=EVENT_SAFEGUARD_REVIEW,
+            phase=PHASE_COORDINATION,
+            duration_ms=node_ms,
+            llm_api_duration_ms=llm_ms,
+            token_usage=self._token_delta(tok_before),
             payload={
-                "step": "safeguard_review",
+                "step": EVENT_SAFEGUARD_REVIEW,
                 "allow": state["safeguard_allowed"],
                 "reason": state["safeguard_reason"],
             },
@@ -265,6 +352,7 @@ class LangchainCodingMAS(CodingMASBase):
 
     # --- Step 6: Commander redirects issue back to Writer with essential log information ---
     def _commander_redirect_writer(self, state: WorkflowState) -> WorkflowState:
+        t_node = time.perf_counter()
         state["attempt"] = state["attempt"] + 1
         logs = (
             f"Safeguard reason: {state.get('safeguard_reason', '')}\n"
@@ -282,16 +370,25 @@ class LangchainCodingMAS(CodingMASBase):
             f"Previous Writer code (for reference):\n```python\n{state.get('writer_code', '')}\n```\n\n"
             f"Logs:\n{logs}"
         )
+        tok_before = self._snapshot_tokens()
+        t_llm = time.perf_counter()
         response = self.commander_llm.invoke(
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
+        llm_ms = (time.perf_counter() - t_llm) * 1000.0
         state["commander_context"] = to_text(getattr(response, "content", response))
+        node_ms = (time.perf_counter() - t_node) * 1000.0
         self.log_conversation_event(
             event_type="pass",
             actor="Commander",
             target="Writer",
+            event_name=EVENT_REDIRECT_WRITER,
+            phase=PHASE_COORDINATION,
+            duration_ms=node_ms,
+            llm_api_duration_ms=llm_ms,
+            token_usage=self._token_delta(tok_before),
             payload={
-                "step": "redirect_writer",
+                "step": EVENT_REDIRECT_WRITER,
                 "attempt": state["attempt"],
                 "redirect_context": state["commander_context"],
             },
@@ -309,18 +406,24 @@ class LangchainCodingMAS(CodingMASBase):
         if "Complete the following Python code" in query:
             # HumanEval-style prompts are completion tasks where code can be non-standalone.
             # Let the benchmark harness execute the completion with tests.
+            t0 = time.perf_counter()
             state["requires_execution"] = False
+            dur_ms = (time.perf_counter() - t0) * 1000.0
             self.log_conversation_event(
                 event_type="action",
                 actor="Commander",
+                event_name=EVENT_DECIDE_EXECUTION,
+                phase=PHASE_COORDINATION,
+                duration_ms=dur_ms,
                 payload={
-                    "step": "decide_execution",
+                    "step": EVENT_DECIDE_EXECUTION,
                     "requires_execution": False,
                     "reason": "humaneval_completion_prompt",
                 },
             )
             return state
 
+        t_node = time.perf_counter()
         system = (
             "You are the Commander. After Safeguard clearance, decide whether running the Writer's "
             "code is required to answer the user.\n"
@@ -333,17 +436,26 @@ class LangchainCodingMAS(CodingMASBase):
             f"User query:\n{query}\n\n"
             f"Writer code:\n```python\n{state['writer_code']}\n```"
         )
+        tok_before = self._snapshot_tokens()
+        t_llm = time.perf_counter()
         response = self.commander_llm.invoke(
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
+        llm_ms = (time.perf_counter() - t_llm) * 1000.0
         parsed = safe_json_parse(to_text(getattr(response, "content", response)))
         # Default to True (safe fallback for multi-agent code evaluation) if parsing fails.
         state["requires_execution"] = bool(parsed.get("requires_execution", True))
+        node_ms = (time.perf_counter() - t_node) * 1000.0
         self.log_conversation_event(
             event_type="action",
             actor="Commander",
+            event_name=EVENT_DECIDE_EXECUTION,
+            phase=PHASE_COORDINATION,
+            duration_ms=node_ms,
+            llm_api_duration_ms=llm_ms,
+            token_usage=self._token_delta(tok_before),
             payload={
-                "step": "decide_execution",
+                "step": EVENT_DECIDE_EXECUTION,
                 "requires_execution": state["requires_execution"],
             },
         )
@@ -355,14 +467,19 @@ class LangchainCodingMAS(CodingMASBase):
         return "commander_skip_execution"
 
     def _commander_execute_code(self, state: WorkflowState) -> WorkflowState:
+        t0 = time.perf_counter()
         output, error = execute_python(state["writer_code"])
+        dur_ms = (time.perf_counter() - t0) * 1000.0
         state["execution_output"] = output
         state["execution_error"] = error
         self.log_conversation_event(
             event_type="action",
             actor="Commander",
+            event_name=EVENT_EXECUTE_CODE,
+            phase=PHASE_EXECUTION,
+            duration_ms=dur_ms,
             payload={
-                "step": "execute_code",
+                "step": EVENT_EXECUTE_CODE,
                 "execution_output": output,
                 "execution_error": error,
             },
@@ -370,17 +487,23 @@ class LangchainCodingMAS(CodingMASBase):
         return state
 
     def _commander_skip_execution(self, state: WorkflowState) -> WorkflowState:
+        t0 = time.perf_counter()
         state["execution_output"] = "(Execution not run: Commander determined it was not required.)"
         state["execution_error"] = ""
+        dur_ms = (time.perf_counter() - t0) * 1000.0
         self.log_conversation_event(
             event_type="action",
             actor="Commander",
-            payload={"step": "skip_execution"},
+            event_name=EVENT_SKIP_EXECUTION,
+            phase=PHASE_EXECUTION,
+            duration_ms=dur_ms,
+            payload={"step": EVENT_SKIP_EXECUTION},
         )
         return state
 
     # --- Step 7 (part): Writer interprets logs / provides the Writer-side answer ---
     def _writer_interpret(self, state: WorkflowState) -> WorkflowState:
+        t_node = time.perf_counter()
         if state.get("execution_error"):
             # Execution failed: Step 6 — Commander redirects to Writer (unless max attempts).
             if state["attempt"] + 1 >= state["max_iterations"]:
@@ -402,22 +525,32 @@ class LangchainCodingMAS(CodingMASBase):
             f"Stdout / summarized output:\n{state['execution_output']}\n\n"
             f"Execution error line (if any):\n{state['execution_error'] or '(none)'}"
         )
+        tok_before = self._snapshot_tokens()
+        t_llm = time.perf_counter()
         response = self.writer_llm.invoke(
             [SystemMessage(content=system), HumanMessage(content=human)]
         )
+        llm_ms = (time.perf_counter() - t_llm) * 1000.0
         state["writer_interpretation"] = to_text(getattr(response, "content", response))
+        node_ms = (time.perf_counter() - t_node) * 1000.0
         self.log_conversation_event(
             event_type="agent_output",
             actor="Writer",
             target="Commander",
+            event_name=EVENT_WRITER_INTERPRET,
+            phase=PHASE_GENERATION,
+            duration_ms=node_ms,
+            llm_api_duration_ms=llm_ms,
+            token_usage=self._token_delta(tok_before),
             payload={
-                "step": "writer_interpret",
+                "step": EVENT_WRITER_INTERPRET,
                 "writer_interpretation": state["writer_interpretation"],
             },
         )
         return state
 
     def _route_after_writer_interpret(self, state: WorkflowState) -> str:
+        # this should be added to overhead timing
         if state.get("execution_error") and state["requires_execution"]:
             if state["attempt"] + 1 >= state["max_iterations"]:
                 return "commander_conclude"
@@ -426,6 +559,9 @@ class LangchainCodingMAS(CodingMASBase):
 
     # --- Step 8: Commander furnishes the concluding answer to the user ---
     def _commander_conclude(self, state: WorkflowState) -> WorkflowState:
+        tok_before = self._snapshot_tokens()
+        t_step = time.perf_counter()
+        llm_api_ms: float | None = None
         if (state.get("writer_interpretation") or "").strip():
             system = (
                 "You are the Commander. Step 8: furnish the user with the concluding answer. "
@@ -442,9 +578,11 @@ class LangchainCodingMAS(CodingMASBase):
                 f"Execution error: {state.get('execution_error', '') or '(none)'}\n"
                 f"Execution output: {state.get('execution_output', '') or '(none)'}\n"
             )
+            t_llm = time.perf_counter()
             response = self.commander_llm.invoke(
                 [SystemMessage(content=system), HumanMessage(content=human)]
             )
+            llm_api_ms = (time.perf_counter() - t_llm) * 1000.0
             final = to_text(getattr(response, "content", response))
         else:
             if not state.get("safeguard_allowed") and state.get("safeguard_reason"):
@@ -460,13 +598,21 @@ class LangchainCodingMAS(CodingMASBase):
             else:
                 final = "I could not produce a final answer for this query."
 
+        conclude_dur_ms = (time.perf_counter() - t_step) * 1000.0
+        conclude_tokens = self._token_delta(tok_before)
+
         state["final_answer"] = final
         state["finished"] = True
         self.log_conversation_event(
             event_type="final",
             actor="Commander",
+            event_name=EVENT_CONCLUDE,
+            phase=PHASE_FINALIZATION,
+            duration_ms=conclude_dur_ms,
+            llm_api_duration_ms=llm_api_ms,
+            token_usage=conclude_tokens if sum(conclude_tokens.values()) > 0 else None,
             payload={
-                "step": "conclude",
+                "step": EVENT_CONCLUDE,
                 "final_answer": final,
                 "safeguard_allowed": state.get("safeguard_allowed"),
                 "execution_error": state.get("execution_error", ""),
@@ -478,6 +624,7 @@ class LangchainCodingMAS(CodingMASBase):
     def answer(self, query: str) -> Dict[str, Any]:
         self.reset_token_counts()
         self.begin_conversation_log(query)
+        wall_t0 = time.perf_counter()
         start_state: WorkflowState = {
             "user_query": query,
             "memory": self.memory.copy(),
@@ -495,15 +642,17 @@ class LangchainCodingMAS(CodingMASBase):
             "final_answer": "",
             "finished": False,
         }
-        state_output = self.graph.invoke(start_state)
+
+        state_output = self.graph.invoke(start_state, config={"callbacks": [self.time_between_nodes_cb, self.token_tracking_cb]})
         
-        # Inject token usage directly into the output dictionary for easy access by runners
-        state_output["token_usage"] = {
-            "total_tokens": self.token_tracker.total_tokens,
-            "prompt_tokens": self.token_tracker.prompt_tokens,
-            "completion_tokens": self.token_tracker.completion_tokens
-        }
-        log_path = self.end_conversation_log(state_output.get("final_answer", ""))
+        state_output["langgraph_between_nodes_duration_ms"] = self.time_between_nodes_cb.between_nodes_ms
+        state_output["token_usage"] = self._snapshot_tokens()  
+        
+        mas_wall_ms = (time.perf_counter() - wall_t0) * 1000.0
+        log_path = self.end_conversation_log(
+            state_output.get("final_answer", ""),
+            mas_total_duration_ms=mas_wall_ms,
+        )
         state_output["conversation_log_path"] = log_path
         
         return state_output

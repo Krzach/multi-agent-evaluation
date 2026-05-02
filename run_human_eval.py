@@ -3,7 +3,7 @@ import json
 import argparse
 from dotenv import load_dotenv
 
-from coding_scenario.langchain_mas import LangchainCodingMAS
+from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
 from benchmarks.human_eval.dataset import HumanEvalDataset
 from benchmarks.human_eval.runner import HumanEvalRunner
 

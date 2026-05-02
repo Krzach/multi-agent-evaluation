@@ -67,6 +67,11 @@
           "minimum": 0,
           "description": "Wall time for this step when measured"
         },
+        "llm_api_duration_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Time inside the provider LLM API call for this step; the remainder of duration_ms is counted as time_duration_ms (outside the LLM call) for this event's actor in per-agent aggregates. If omitted, metrics may infer LLM time from token_usage on legacy logs."
+        },
         "token_usage": {
           "type": "object",
           "properties": {

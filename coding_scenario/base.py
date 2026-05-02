@@ -141,9 +141,15 @@ class CodingMASBase(ABC):
         event_name: Optional[str] = None,
         phase: Optional[Phase] = None,
         duration_ms: Optional[float] = None,
+        llm_api_duration_ms: Optional[float] = None,
         token_usage: Optional[Dict[str, int]] = None,
     ) -> None:
-        """Append one structured event into the active conversation log."""
+        """Append one structured event into the active conversation log.
+
+        ``duration_ms`` is total wall time for the step. When an LLM provider call is part of
+        the step, set ``llm_api_duration_ms`` to the time spent inside that call so metrics can
+        separate step wall time outside the LLM call from API latency.
+        """
         if self._log_path is None or self._log_session_id is None:
             return
 
@@ -172,6 +178,8 @@ class CodingMASBase(ABC):
             event_record["phase"] = resolved_phase
         if duration_ms is not None:
             event_record["duration_ms"] = duration_ms
+        if llm_api_duration_ms is not None:
+            event_record["llm_api_duration_ms"] = llm_api_duration_ms
         if token_usage is not None:
             event_record["token_usage"] = {
                 "prompt_tokens": int(token_usage.get("prompt_tokens", 0)),

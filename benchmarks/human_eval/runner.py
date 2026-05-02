@@ -3,7 +3,7 @@ import time
 from typing import List, Dict, Any
 
 from benchmarks.base import BenchmarkRunner
-from metrics.communication_overhead import build_overhead_envelope
+from metrics.conversation_log_metrics import build_conversation_log_metrics_envelope
 
 
 class HumanEvalRunner(BenchmarkRunner):
@@ -31,7 +31,7 @@ class HumanEvalRunner(BenchmarkRunner):
             )
             
             # Start timer for Total Task Completion Time
-            start_time = time.time()
+            start_time = time.perf_counter()
             
             # Execute MAS
             mas_output = self.mas.answer(task_input)
@@ -53,10 +53,10 @@ class HumanEvalRunner(BenchmarkRunner):
             conversation_log_path = mas_output.get("conversation_log_path")
 
             # End timer
-            end_time = time.time()
+            end_time = time.perf_counter()
             total_task_time = end_time - start_time
 
-            communication_overhead_metrics = build_overhead_envelope(
+            conversation_log_metrics = build_conversation_log_metrics_envelope(
                 mas_output,
                 total_task_time,
             )
@@ -96,7 +96,7 @@ class HumanEvalRunner(BenchmarkRunner):
                 "generated_code": clean_code,
                 "conversation_log_path": conversation_log_path,
                 "mas_framework": self.mas.__class__.__name__,
-                "communication_overhead_metrics": communication_overhead_metrics,
+                "conversation_log_metrics": conversation_log_metrics,
 
                 # Qualitative Metrics
                 "correctness": 1.0 if is_correct else 0.0,

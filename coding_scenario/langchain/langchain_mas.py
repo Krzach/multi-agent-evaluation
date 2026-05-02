@@ -16,6 +16,9 @@ Steps 3–6 may repeat until resolution or max iterations (stand-in for timeout)
 Each ``log_conversation_event`` sets ``actor`` to ``Commander``, ``Writer``, or ``Safeguard`` so
 ``metrics/conversation_log_metrics`` can sum **time outside the LLM call** vs **LLM API**
 milliseconds per agent (``duration_ms`` minus ``llm_api_duration_ms`` when the latter is set).
+``llm_api_duration_ms`` is wall time around each ``ChatOpenAI.invoke`` (provider I/O plus
+LangChain runnable work for that call). Tighter framework-native bounds would use
+``BaseCallbackHandler.on_llm_start`` / ``on_llm_end``; differences are usually small.
 ``phase`` remains a workflow hint in the log; aggregates use ``actor``, not ``phase``.
 """
 
@@ -30,6 +33,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from coding_scenario.base import (
     CodingMASBase,
+    ORCHESTRATION_GAP_MS_KEY,
     EVENT_CONCLUDE,
     EVENT_DECIDE_EXECUTION,
     EVENT_EXECUTE_CODE,
@@ -645,7 +649,7 @@ class LangchainCodingMAS(CodingMASBase):
 
         state_output = self.graph.invoke(start_state, config={"callbacks": [self.time_between_nodes_cb, self.token_tracking_cb]})
         
-        state_output["langgraph_between_nodes_duration_ms"] = self.time_between_nodes_cb.between_nodes_ms
+        state_output[ORCHESTRATION_GAP_MS_KEY] = self.time_between_nodes_cb.between_nodes_ms
         state_output["token_usage"] = self._snapshot_tokens()  
         
         mas_wall_ms = (time.perf_counter() - wall_t0) * 1000.0

@@ -26,11 +26,12 @@ from autogen_agentchat.conditions import MaxMessageTermination
 from autogen_agentchat.messages import BaseChatMessage, TextMessage
 from autogen_agentchat.teams import DiGraphBuilder, GraphFlow
 from autogen_core import CancellationToken
-from autogen_core.models import ModelFamily, ModelInfo, SystemMessage, UserMessage
+from autogen_core.models import ModelFamily, ModelInfo, RequestUsage, SystemMessage, UserMessage
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from coding_scenario.base import (
     CodingMASBase,
+    ORCHESTRATION_GAP_MS_KEY,
     EVENT_CONCLUDE,
     EVENT_DECIDE_EXECUTION,
     EVENT_EXECUTE_CODE,
@@ -120,6 +121,21 @@ def _final_assistant_text(result: TaskResult) -> str:
         if isinstance(msg, TextMessage):
             return to_text(msg.content)
     return ""
+
+
+def _usage_from_request_usage(usage: Optional[RequestUsage]) -> Optional[Dict[str, int]]:
+    """Map autogen_core ``RequestUsage`` to conversation-log ``token_usage`` dict."""
+    if usage is None:
+        return None
+    pt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    ct = int(getattr(usage, "completion_tokens", 0) or 0)
+    if not pt and not ct:
+        return None
+    return {
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "total_tokens": pt + ct,
+    }
 
 
 def _usage_from_task_result(result: TaskResult) -> Optional[Dict[str, int]]:
@@ -225,18 +241,27 @@ class _OpenAiCodingRoleAgent(BaseChatAgent):
     async def on_reset(self, cancellation_token: CancellationToken) -> None:
         pass
 
-    async def run_system_user(self, system: str, human: str) -> LlmTurnResult:
-        task_messages = [
-            TextMessage(content=system, source="Orchestrator"),
-            TextMessage(content=human, source="Orchestrator"),
+    async def run_system_user(
+        self, system: str, human: str, cancellation_token: CancellationToken
+    ) -> LlmTurnResult:
+        """LLM timing is ``OpenAIChatCompletionClient.create`` only (same path as ``on_messages``).
+
+        Using ``self.run()`` would include AgentChat routing overhead and inflate ``llm_api_duration_ms``.
+        """
+        llm_messages = [
+            SystemMessage(content=system),
+            UserMessage(content=human, source="user"),
         ]
         t_llm = time.perf_counter()
-        result = await self.run(task=task_messages)
+        result = await self._model_client.create(
+            messages=llm_messages,
+            cancellation_token=cancellation_token,
+        )
         llm_ms = (time.perf_counter() - t_llm) * 1000.0
         return LlmTurnResult(
-            text=_final_assistant_text(result),
+            text=to_text(result.content),
             llm_duration_ms=llm_ms,
-            token_usage=_usage_from_task_result(result),
+            token_usage=_usage_from_request_usage(result.usage),
         )
 
 
@@ -253,7 +278,11 @@ class CommanderAgent(_OpenAiCodingRoleAgent):
         return "Complete the following Python code" in user_query
 
     async def pass_question_to_writer(
-        self, *, user_query: str, memory_snippets: list[str]
+        self,
+        *,
+        user_query: str,
+        memory_snippets: list[str],
+        cancellation_token: CancellationToken,
     ) -> LlmTurnResult:
         memory_text = "\n".join(f"- {item}" for item in memory_snippets) or "(none)"
         system = (
@@ -265,7 +294,7 @@ class CommanderAgent(_OpenAiCodingRoleAgent):
             "Plain text only."
         )
         human = f"User query:\n{user_query}\n\nPrior interaction memory:\n{memory_text}"
-        return await self.run_system_user(system, human)
+        return await self.run_system_user(system, human, cancellation_token)
 
     async def redirect_writer_after_failure(
         self,
@@ -273,6 +302,7 @@ class CommanderAgent(_OpenAiCodingRoleAgent):
         user_query: str,
         writer_code: str,
         logs: str,
+        cancellation_token: CancellationToken,
     ) -> LlmTurnResult:
         system = (
             "You are the Commander. Step 6: redirect the issue back to the Writer with the "
@@ -284,9 +314,15 @@ class CommanderAgent(_OpenAiCodingRoleAgent):
             f"Previous Writer code (for reference):\n```python\n{writer_code}\n```\n\n"
             f"Logs:\n{logs}"
         )
-        return await self.run_system_user(system, human)
+        return await self.run_system_user(system, human, cancellation_token)
 
-    async def decide_requires_execution(self, *, user_query: str, writer_code: str) -> LlmTurnResult:
+    async def decide_requires_execution(
+        self,
+        *,
+        user_query: str,
+        writer_code: str,
+        cancellation_token: CancellationToken,
+    ) -> LlmTurnResult:
         system = (
             "You are the Commander. After Safeguard clearance, decide whether running the Writer's "
             "code is required to answer the user.\n"
@@ -296,7 +332,7 @@ class CommanderAgent(_OpenAiCodingRoleAgent):
             "Return strict JSON: {\"requires_execution\": true|false, \"rationale\": string}."
         )
         human = f"User query:\n{user_query}\n\nWriter code:\n```python\n{writer_code}\n```"
-        return await self.run_system_user(system, human)
+        return await self.run_system_user(system, human, cancellation_token)
 
     async def furnish_final_answer(
         self,
@@ -307,6 +343,7 @@ class CommanderAgent(_OpenAiCodingRoleAgent):
         safeguard_reason: str,
         execution_error: str,
         execution_output: str,
+        cancellation_token: CancellationToken,
     ) -> LlmTurnResult:
         system = (
             "You are the Commander. Step 8: furnish the user with the concluding answer. "
@@ -323,7 +360,7 @@ class CommanderAgent(_OpenAiCodingRoleAgent):
             f"Execution error: {execution_error or '(none)'}\n"
             f"Execution output: {execution_output or '(none)'}\n"
         )
-        return await self.run_system_user(system, human)
+        return await self.run_system_user(system, human, cancellation_token)
 
     @staticmethod
     def template_failure_message(
@@ -355,7 +392,11 @@ class WriterAgent(_OpenAiCodingRoleAgent):
         )
 
     async def generate_code_bundle(
-        self, *, user_query: str, commander_context: str
+        self,
+        *,
+        user_query: str,
+        commander_context: str,
+        cancellation_token: CancellationToken,
     ) -> WriterCodeResult:
         writer_prompt = (
             "You are the Writer: you combine Coder and Interpreter. "
@@ -371,7 +412,7 @@ class WriterAgent(_OpenAiCodingRoleAgent):
             f"Commander instructions (passed from Commander to you):\n{commander_context}\n\n"
             "Return JSON only."
         )
-        turn = await self.run_system_user(writer_prompt, human)
+        turn = await self.run_system_user(writer_prompt, human, cancellation_token)
         parsed = safe_json_parse(turn.text)
         code = extract_code(str(parsed.get("code", "")))
         if not code:
@@ -392,6 +433,7 @@ class WriterAgent(_OpenAiCodingRoleAgent):
         writer_notes: str,
         execution_output: str,
         execution_error: str,
+        cancellation_token: CancellationToken,
     ) -> LlmTurnResult:
         system = (
             "You are the Writer in Interpreter mode only. Step 7: interpret execution outcomes "
@@ -405,7 +447,7 @@ class WriterAgent(_OpenAiCodingRoleAgent):
             f"Stdout / summarized output:\n{execution_output}\n\n"
             f"Execution error line (if any):\n{execution_error or '(none)'}"
         )
-        return await self.run_system_user(system, human)
+        return await self.run_system_user(system, human, cancellation_token)
 
 
 class SafeguardAgent(_OpenAiCodingRoleAgent):
@@ -417,7 +459,11 @@ class SafeguardAgent(_OpenAiCodingRoleAgent):
         )
 
     async def review_code(
-        self, *, commander_context: str, writer_code: str
+        self,
+        *,
+        commander_context: str,
+        writer_code: str,
+        cancellation_token: CancellationToken,
     ) -> SafeguardReviewResult:
         allowed, reason = rule_based_safeguard(writer_code)
         if not allowed:
@@ -432,7 +478,7 @@ class SafeguardAgent(_OpenAiCodingRoleAgent):
             f"Commander context (for awareness only):\n{commander_context[:1200]}\n\n"
             f"Code to review:\n```python\n{writer_code}\n```"
         )
-        turn = await self.run_system_user(system, human)
+        turn = await self.run_system_user(system, human, cancellation_token)
         parsed = safe_json_parse(turn.text)
         return SafeguardReviewResult(
             blocked_by_rule=False,
@@ -509,6 +555,7 @@ class PassWriterStepAgent(_CtxStepAgent):
         turn = await self._commander.pass_question_to_writer(
             user_query=self._ctx.user_query,
             memory_snippets=list(mem),
+            cancellation_token=cancellation_token,
         )
         mas._record_usage(turn.token_usage)
         self._ctx.commander_context = turn.text
@@ -546,6 +593,7 @@ class WriterGenerateStepAgent(_CtxStepAgent):
         bundle = await self._writer.generate_code_bundle(
             user_query=self._ctx.user_query,
             commander_context=self._ctx.commander_context,
+            cancellation_token=cancellation_token,
         )
         mas._record_usage(bundle.token_usage)
         self._ctx.writer_code = bundle.writer_code
@@ -620,6 +668,7 @@ class SafeguardStepAgent(_CtxStepAgent):
         review = await self._safeguard.review_code(
             commander_context=self._ctx.commander_context,
             writer_code=self._ctx.writer_code,
+            cancellation_token=cancellation_token,
         )
 
         if review.blocked_by_rule:
@@ -706,6 +755,7 @@ class CommanderDecideStepAgent(_CtxStepAgent):
         turn = await self._commander.decide_requires_execution(
             user_query=q,
             writer_code=self._ctx.writer_code,
+            cancellation_token=cancellation_token,
         )
         mas._record_usage(turn.token_usage)
         parsed = safe_json_parse(turn.text)
@@ -815,6 +865,7 @@ class WriterInterpretStepAgent(_CtxStepAgent):
             writer_notes=self._ctx.writer_notes,
             execution_output=self._ctx.execution_output,
             execution_error=self._ctx.execution_error,
+            cancellation_token=cancellation_token,
         )
         mas._record_usage(turn.token_usage)
         self._ctx.writer_interpretation = turn.text
@@ -863,6 +914,7 @@ class CommanderRedirectStepAgent(_CtxStepAgent):
             user_query=self._ctx.user_query,
             writer_code=self._ctx.writer_code,
             logs=logs,
+            cancellation_token=cancellation_token,
         )
         mas._record_usage(turn.token_usage)
         self._ctx.commander_context = turn.text
@@ -916,6 +968,7 @@ class CommanderConcludeStepAgent(_CtxStepAgent):
                 safeguard_reason=self._ctx.safeguard_reason,
                 execution_error=self._ctx.execution_error,
                 execution_output=self._ctx.execution_output,
+                cancellation_token=cancellation_token,
             )
             mas._record_usage(turn.token_usage)
             self._ctx.final_answer = turn.text
@@ -1116,7 +1169,7 @@ class AutoGenCodingMAS(CodingMASBase):
             mas_total_duration_ms=mas_wall_ms,
         )
         state["conversation_log_path"] = log_path
-        state["langgraph_between_nodes_duration_ms"] = self._between_steps_ms
+        state[ORCHESTRATION_GAP_MS_KEY] = self._between_steps_ms
         state["token_usage"] = {
             "prompt_tokens": self._run_prompt_tokens,
             "completion_tokens": self._run_completion_tokens,

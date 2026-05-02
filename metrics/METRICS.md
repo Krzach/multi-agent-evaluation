@@ -22,7 +22,7 @@ Coding benchmarks append one object per task:
 
 ## 1. Conversation log metrics (`conversation_log_metrics`)
 
-Computed by **`build_conversation_log_metrics_envelope(mas_output, mas_task_seconds)`**, which calls **`compute_conversation_log_metrics(...)`**. It passes **`between_nodes_duration_ms`** from **`mas_output["langgraph_between_nodes_duration_ms"]`** when that value is numeric; otherwise between-node totals are **0**.
+Computed by **`build_conversation_log_metrics_envelope(mas_output, mas_task_seconds, framework_class_name=...)`**, which calls **`compute_conversation_log_metrics(...)`**. It passes **`between_nodes_duration_ms`** from **`mas_output["orchestration_gap_ms"]`** when numeric (legacy key **`langgraph_between_nodes_duration_ms`** is still accepted); otherwise between-node totals are **0**.
 
 - **`mas_task_seconds`**: wall time for the full `answer()` call, measured by the benchmark runner (`time.perf_counter()` around `mas.answer(...)`).
 - **`log_path`**: `mas_output["conversation_log_path"]` when the MAS wrote a JSONL log.
@@ -67,11 +67,13 @@ Summed **per `actor` bucket** (`commander`, `writer`, `safeguard`, `other`) as *
 
 Summed **`token_usage`** per actor bucket.
 
-#### D. Between-node time (LangGraph)
+#### D. Orchestration gap (“between-node” in aggregates)
 
-**Source:** `TimeBetweenNodesCallback` in **`coding_scenario/langchain/callbacks/time_between_nodes.py`**, on **`graph.invoke`** in **`LangchainCodingMAS`** (**`coding_scenario/langchain/langchain_mas.py`**).
+**Key on `answer()`:** **`orchestration_gap_ms`** (`coding_scenario.base.ORCHESTRATION_GAP_MS_KEY`).
 
-**Other MAS builds:** omit **`langgraph_between_nodes_duration_ms`** on **`answer()`** → between-node ms in aggregates are **0**.
+**LangGraph:** `TimeBetweenNodesCallback` in **`coding_scenario/langchain/callbacks/time_between_nodes.py`**, on **`graph.invoke`** in **`LangchainCodingMAS`**.
+
+**AutoGen:** manual step-boundary gaps in **`AutoGenCodingMAS`**. If the key is omitted → **0** in aggregates.
 
 #### E. Task wall denominator
 
@@ -92,7 +94,7 @@ Summed **`token_usage`** per actor bucket.
 | **`total_event_duration_ms`**   | Sum of **`duration_ms`** over all events.                                                                                                 |
 | **`total_time_duration_ms`**    | Sum of **`time_duration_ms`** over all events (all actors).                                                                               |
 | **`total_llm_api_duration_ms`** | Sum of LLM ms over all events.                                                                                                            |
-| **`between_nodes_duration_ms`** | LangGraph callback total (ms); **0** if not supplied.                                                                                     |
+| **`between_nodes_duration_ms`** | **`orchestration_gap_ms`** from **`answer()`** (ms); **0** if not supplied.                                                                 |
 
 #### G. `task_wall_attribution`
 
@@ -116,11 +118,11 @@ Per-agent times and shares are only under **`aggregate_agents.by_agent`** (no se
 #### LangChain / LangGraph (`LangchainCodingMAS`)
 
 - **`duration_ms`** / **`llm_api_duration_ms`**: measured around node work and LLM **`invoke`** respectively.
-- **Between-node:** callback on **`graph.invoke`** → **`langgraph_between_nodes_duration_ms`** on **`answer()`** → folded into **`aggregate_agents.between_nodes_duration_ms`**.
+- **Orchestration gap:** callback on **`graph.invoke`** → **`orchestration_gap_ms`** on **`answer()`** → folded into **`aggregate_agents.between_nodes_duration_ms`**.
 
 #### AutoGen / SPADE
 
-Same **`actor`** strings; **`duration_ms`** / **`llm_api_duration_ms`** fidelity differs (see previous caveats in code comments). Legacy logs without **`llm_api_duration_ms`** may attribute most wall time to LLM when tokens exist.
+Same **`actor`** strings; **`duration_ms`** / **`llm_api_duration_ms`** fidelity differs (AutoGen uses timed **`OpenAIChatCompletionClient.create`** for role helpers). Legacy logs without **`llm_api_duration_ms`** may attribute most wall time to LLM when tokens exist. **`orchestration_gap_ms`** uses the same GraphFlow step-gap timer as in code.
 
 ---
 

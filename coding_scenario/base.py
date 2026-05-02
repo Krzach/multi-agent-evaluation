@@ -18,6 +18,9 @@ PHASE_GENERATION: Phase = "generation"
 PHASE_EXECUTION: Phase = "execution"
 PHASE_FINALIZATION: Phase = "finalization"
 
+# ``answer()`` return dict: total orchestration gap in ms (LangGraph node gaps vs AutoGen step gaps).
+ORCHESTRATION_GAP_MS_KEY = "orchestration_gap_ms"
+
 # Stable event_name values shared across LangChain / AutoGen / mock SPADE
 EVENT_RECEIVE_TASK = "receive_task"
 EVENT_PASS_TO_WRITER = "pass_to_writer"
@@ -54,8 +57,9 @@ class CodingMASBase(ABC):
 
     The ``answer`` return value is a dict shaped for benchmark runners (e.g. HumanEval):
     at minimum ``writer_code``, ``attempt``, ``safeguard_allowed``, ``final_answer``;
-    LangChain implementations may add ``token_usage`` with keys
-    ``prompt_tokens``, ``completion_tokens``, ``total_tokens``.
+    LangChain / AutoGen implementations may add ``token_usage`` (``prompt_tokens``,
+    ``completion_tokens``, ``total_tokens``) and ``orchestration_gap_ms`` (see
+    ``ORCHESTRATION_GAP_MS_KEY``).
     """
 
     def __init__(self, model_id: str, max_iterations: int) -> None:

@@ -31,19 +31,19 @@ If **`log_path`** is missing or the file does not exist, aggregates are mostly z
 
 ### 1.2 Source data: JSONL conversation log
 
-| `record_type`   | Role |
-|-----------------|------|
-| `session_start` | Session metadata (framework name, model, query, …). |
+| `record_type`   | Role                                                                                                                                                     |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_start` | Session metadata (framework name, model, query, …).                                                                                                      |
 | `event`         | **`actor`** (Commander / Writer / Safeguard), optional **`phase`**, **`duration_ms`**, optional **`llm_api_duration_ms`**, optional **`token_usage`**, … |
-| `session_end`   | May include **`mas_total_duration_ms`**. |
+| `session_end`   | May include **`mas_total_duration_ms`**.                                                                                                                 |
 
 **Per-event timing** (`CodingMASBase.log_conversation_event`):
 
-| Field | Meaning |
-|-------|---------|
-| **`duration_ms`** | Wall time for the step (ms). |
+| Field                     | Meaning                                                                                                                                                                                      |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`duration_ms`**         | Wall time for the step (ms).                                                                                                                                                                 |
 | **`llm_api_duration_ms`** | Optional. Time inside the provider LLM call (ms). **Time outside the LLM call** for the event (ms) = **`max(0, duration_ms - llm_api_duration_ms)`** — aggregated as **`time_duration_ms`**. |
-| **`actor`** | Used to bucket sums: **`commander`**, **`writer`**, **`safeguard`** (case-insensitive); anything else rolls into **`other`**. |
+| **`actor`**               | Used to bucket sums: **`commander`**, **`writer`**, **`safeguard`** (case-insensitive); anything else rolls into **`other`**.                                                                |
 
 **`phase`** (`coordination`, `generation`, `execution`, `finalization`) is still written for workflow context; **aggregates in `conversation_log_metrics` use `actor` only**, not `phase`.
 
@@ -58,7 +58,7 @@ Same rules as before: explicit **`llm_api_duration_ms`** if ≥ 0; else legacy h
 #### B. Time outside the LLM call (per event)
 
 \[
-\texttt{time\_ms} = \max(0,\ \texttt{duration\_ms} - \texttt{llm\_api\_ms})
+\texttt{time_ms} = \max(0,\ \texttt{duration_ms} - \texttt{llm_api_ms})
 \]
 
 Summed **per `actor` bucket** (`commander`, `writer`, `safeguard`, `other`) as **`time_duration_ms`**.
@@ -76,37 +76,38 @@ Summed **`token_usage`** per actor bucket.
 #### E. Task wall denominator
 
 \[
-\texttt{denom\_seconds} =
+\texttt{denom_seconds} =
 \begin{cases}
-\texttt{mas\_task\_seconds} & \text{if } > 0 \\
-\texttt{session\_end.mas\_total\_duration\_ms} / 1000 & \text{else if present} \\
-\texttt{total\_event\_duration\_ms} / 1000 & \text{else}
+\texttt{mas_task_seconds} & \text{if } > 0 \\
+\texttt{session_end.mas_total_duration_ms} / 1000 & \text{else if present} \\
+\texttt{total_event_duration_ms} / 1000 & \text{else}
 \end{cases}
 \]
 
 #### F. `aggregate_agents`
 
-| Key | Meaning |
-|-----|---------|
-| **`by_agent`** | For each of **`commander`**, **`writer`**, **`safeguard`**, **`other`**: **`time_duration_ms`**, **`llm_api_duration_ms`**, **`tokens`**. |
-| **`total_event_duration_ms`** | Sum of **`duration_ms`** over all events. |
-| **`total_time_duration_ms`** | Sum of **`time_duration_ms`** over all events (all actors). |
-| **`total_llm_api_duration_ms`** | Sum of LLM ms over all events. |
-| **`between_nodes_duration_ms`** | LangGraph callback total (ms); **0** if not supplied. |
+| Key                             | Meaning                                                                                                                                   |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **`by_agent`**                  | For each of **`commander`**, **`writer`**, **`safeguard`**, **`other`**: **`time_duration_ms`**, **`llm_api_duration_ms`**, **`tokens`**, **`time_share_of_task_wall`**, **`llm_api_share_of_task_wall`** (shares use §1.3.E). |
+| **`total_event_duration_ms`**   | Sum of **`duration_ms`** over all events.                                                                                                 |
+| **`total_time_duration_ms`**    | Sum of **`time_duration_ms`** over all events (all actors).                                                                               |
+| **`total_llm_api_duration_ms`** | Sum of LLM ms over all events.                                                                                                            |
+| **`between_nodes_duration_ms`** | LangGraph callback total (ms); **0** if not supplied.                                                                                     |
 
 #### G. `task_wall_attribution`
 
 Relates logged durations to **overall task wall time** (not “overhead”):
 
-| Key | Meaning |
-|-----|---------|
-| **`task_wall_denominator_seconds`** | Denominator used for shares (§1.3.E). |
-| **`total_llm_api_time_seconds`** | All events, LLM time. |
-| **`between_nodes_time_seconds`** | Between-node ms / 1000. |
-| **`between_nodes_share_of_task_wall`** | Between-node seconds ÷ denominator. |
-| **`between_nodes_measurement_source`** | How between-node time was obtained. |
-| **`per_agent`** | For **`commander`**, **`writer`**, **`safeguard`**, **`other`**: **`time_seconds`**, **`llm_api_time_seconds`**, **`time_share_of_task_wall`**, **`llm_api_share_of_task_wall`**, **`tokens`**. |
-| **`session_end_wall_duration_ms`** | From `session_end.mas_total_duration_ms` if present, else `null`. |
+| Key                                    | Meaning                                                                                                                                                                                         |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`task_wall_denominator_seconds`**    | Denominator used for shares (§1.3.E).                                                                                                                                                           |
+| **`total_llm_api_time_seconds`**       | All events, LLM time.                                                                                                                                                                           |
+| **`between_nodes_time_seconds`**       | Between-node ms / 1000.                                                                                                                                                                         |
+| **`between_nodes_share_of_task_wall`** | Between-node seconds ÷ denominator.                                                                                                                                                             |
+| **`between_nodes_measurement_source`** | How between-node time was obtained.                                                                                                                                                             |
+| **`session_end_wall_duration_ms`**     | From `session_end.mas_total_duration_ms` if present, else `null`.                                                                                                                               |
+
+Per-agent times and shares are only under **`aggregate_agents.by_agent`** (no second copy here).
 
 ---
 
@@ -139,42 +140,6 @@ Runner heuristics (attempt counts, message estimates); not derived from JSONL ag
 
 ---
 
-## 3. Reading results in Python / jq
-
-```python
-import json
-from pathlib import Path
-
-rows = json.loads(Path("path/to/results.json").read_text(encoding="utf-8"))
-row = rows[0]
-m = row["conversation_log_metrics"]
-attr = m["task_wall_attribution"]
-cmd = attr["per_agent"]["commander"]
-t_s = cmd["time_seconds"]
-share = cmd["time_share_of_task_wall"]
-```
-
-```bash
-jq '.[0].conversation_log_metrics.task_wall_attribution.per_agent.commander' results.json
-```
-
----
-
-## 4. Related files
-
-| File | Role |
-|------|------|
-| `metrics/conversation_log_metrics.py` | Per-agent aggregates and task-wall attribution. |
-| `coding_scenario/langchain/callbacks/time_between_nodes.py` | Between-node callback. |
-| `coding_scenario/langchain/langchain_mas.py` | Registers callbacks; logs **`actor`**. |
-| `coding_scenario/base.py` | `log_conversation_event`, session helpers. |
-| `coding_scenario/conversation_log.schema.json` | JSON Schema for log lines. |
-| `benchmarks/human_eval/runner.py`, `benchmarks/multiagentbench/runner.py` | Attach **`conversation_log_metrics`**. |
-
----
-
-## 5. Caveats
+## 4. Caveats
 
 - **Shares** are fractions of benchmark-measured **`answer()`** wall time, not provider latency alone.
-- **Between-node** requires LangGraph **`langgraph_node`** metadata on callbacks; re-validate after LangChain/LangGraph upgrades.
-- **Legacy logs** without **`llm_api_duration_ms`** can inflate LLM time when tokens exist → **per-agent `time_duration_ms` / `time_seconds` can look artificially low**.

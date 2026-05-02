@@ -3,8 +3,8 @@
 Each event records total step wall time (``duration_ms``) and optionally the portion spent
 inside the provider call (``llm_api_duration_ms``). The remainder
 (``duration_ms - llm_api_duration_ms``) is **time outside the LLM call** for that step
-(prompt assembly, parsing, graph state updates)—exposed in JSON as ``time_duration_ms`` /
-``time_seconds``, not "overhead".
+(prompt assembly, parsing, graph state updates)—exposed in JSON as ``time_duration_ms`` and
+``time_share_of_task_wall`` on each ``aggregate_agents.by_agent`` entry, not "overhead".
 
 **Between-node** gaps for the LangGraph coding MAS come from ``TimeBetweenNodesCallback``
 (``coding_scenario/langchain/callbacks/time_between_nodes.py``): elapsed time between the
@@ -176,49 +176,33 @@ class LogMetricsCalculator:
             return wall_duration_ms / 1000.0
         return float(aggregate.get("total_event_duration_ms", 0.0)) / 1000.0
 
+    def _apply_agent_shares_of_task_wall(self, aggregate: Dict[str, Any], denom_s: float) -> None:
+        """Mutates ``aggregate["by_agent"]`` in place: add share-of-task-wall for each bucket."""
+        by_agent = aggregate.get("by_agent")
+        if not isinstance(by_agent, dict):
+            return
+        for _ag, block in by_agent.items():
+            if not isinstance(block, dict):
+                continue
+            time_ms = float(block.get("time_duration_ms", 0.0))
+            llm_ms = float(block.get("llm_api_duration_ms", 0.0))
+            time_s = time_ms / 1000.0
+            llm_s = llm_ms / 1000.0
+            block["time_share_of_task_wall"] = (time_s / denom_s) if denom_s > 0 else 0.0
+            block["llm_api_share_of_task_wall"] = (llm_s / denom_s) if denom_s > 0 else 0.0
+
     def build_task_wall_attribution(
         self, aggregate: Dict[str, Any], wall_duration_ms: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Summarize how logged durations relate to overall task wall time: between-node gaps,
-        total LLM API time, and per-agent time-outside-LLM vs LLM splits with shares of the wall.
+        Task-level fields only: denominator, total LLM time, between-node gap vs task wall.
+        Per-agent durations and shares live under ``aggregate_agents.by_agent`` only.
         """
         denom_s = self._task_wall_denominator_seconds(aggregate, wall_duration_ms)
         total_llm_ms = float(aggregate.get("total_llm_api_duration_ms", 0.0))
         between_ms = float(self.between_nodes_duration_ms)
         between_s = between_ms / 1000.0
         between_share = (between_s / denom_s) if denom_s > 0 else 0.0
-
-        by_agent = aggregate.get("by_agent") or {}
-        per_agent: Dict[str, Any] = {}
-        for ag in KNOWN_AGENTS:
-            block = by_agent.get(ag) or {}
-            time_ms = float(block.get("time_duration_ms", 0.0))
-            llm_ms = float(block.get("llm_api_duration_ms", 0.0))
-            time_s = time_ms / 1000.0
-            llm_s = llm_ms / 1000.0
-            per_agent[ag] = {
-                "time_seconds": time_s,
-                "llm_api_time_seconds": llm_s,
-                "time_share_of_task_wall": (time_s / denom_s) if denom_s > 0 else 0.0,
-                "llm_api_share_of_task_wall": (llm_s / denom_s) if denom_s > 0 else 0.0,
-                "tokens": block.get("tokens", {}),
-            }
-
-        other_block = by_agent.get("other") or {}
-        other_time_ms = float(other_block.get("time_duration_ms", 0.0))
-        other_llm_ms = float(other_block.get("llm_api_duration_ms", 0.0))
-        per_agent["other"] = {
-            "time_seconds": other_time_ms / 1000.0,
-            "llm_api_time_seconds": other_llm_ms / 1000.0,
-            "time_share_of_task_wall": (
-                (other_time_ms / 1000.0) / denom_s if denom_s > 0 else 0.0
-            ),
-            "llm_api_share_of_task_wall": (
-                (other_llm_ms / 1000.0) / denom_s if denom_s > 0 else 0.0
-            ),
-            "tokens": other_block.get("tokens", {}),
-        }
 
         return {
             "task_wall_denominator_seconds": denom_s,
@@ -228,7 +212,6 @@ class LogMetricsCalculator:
             "between_nodes_measurement_source": (
                 "langgraph_callback_perf_counter when provided by MAS output; else 0"
             ),
-            "per_agent": per_agent,
             "session_end_wall_duration_ms": wall_duration_ms,
         }
 
@@ -236,6 +219,8 @@ class LogMetricsCalculator:
         aggregate = EventMetricsAggregator(self.records).aggregate()
         aggregate["between_nodes_duration_ms"] = float(self.between_nodes_duration_ms)
         wall_duration_ms = self._session_wall_duration_ms()
+        denom_s = self._task_wall_denominator_seconds(aggregate, wall_duration_ms)
+        self._apply_agent_shares_of_task_wall(aggregate, denom_s)
         return {
             "task_wall_attribution": self.build_task_wall_attribution(aggregate, wall_duration_ms),
             "aggregate_agents": aggregate,

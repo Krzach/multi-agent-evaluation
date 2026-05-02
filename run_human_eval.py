@@ -63,6 +63,8 @@ def main():
     if args.framework == "langchain":
         mas = LangchainCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
     elif args.framework == "autogen":
+        if args.model == "gpt-5.4":
+            args.model = "gpt-5.4-2026-03-05"
         mas = AutoGenCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
     else:
         print(f"Invalid framework: {args.framework}")

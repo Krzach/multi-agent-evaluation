@@ -26,7 +26,7 @@ from autogen_agentchat.conditions import MaxMessageTermination
 from autogen_agentchat.messages import BaseChatMessage, TextMessage
 from autogen_agentchat.teams import DiGraphBuilder, GraphFlow
 from autogen_core import CancellationToken
-from autogen_core.models import SystemMessage, UserMessage
+from autogen_core.models import ModelFamily, ModelInfo, SystemMessage, UserMessage
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from coding_scenario.base import (
@@ -58,6 +58,31 @@ from utils import (
 )
 
 load_dotenv()
+
+
+def _openai_chat_client(model_id: str, api_key: str) -> OpenAIChatCompletionClient:
+    """Instantiate :class:`OpenAIChatCompletionClient`, adding ``model_info`` when needed.
+
+    ``autogen_ext`` only knows a fixed allow-list of model ids. Names like ``gpt-5.4`` or other
+    preview aliases are valid at the API but missing from the registry; those require explicit
+    ``model_info`` or construction raises ``ValueError``.
+    """
+    base: Dict[str, Any] = {"model": model_id, "api_key": api_key, "temperature": 0}
+    try:
+        return OpenAIChatCompletionClient(**base)
+    except ValueError as exc:
+        if "model_info is required" not in str(exc):
+            raise
+    # Conservative modern OpenAI-style capabilities (matches registered GPT-5 class models).
+    fallback: ModelInfo = {
+        "vision": True,
+        "function_calling": True,
+        "json_output": True,
+        "family": ModelFamily.GPT_5,
+        "structured_output": True,
+        "multiple_system_messages": True,
+    }
+    return OpenAIChatCompletionClient(**base, model_info=fallback)
 
 
 @dataclass
@@ -966,8 +991,17 @@ def _build_coding_graph_flow(
     b.add_node(redirect)
     b.add_node(conclude)
 
+    # Fan-in edges must use activation_condition="any": default "all" requires every parent
+    # edge to fire before the target runs. Here pass_to_writer and commander_redirect both
+    # feed writer_generate (only one runs per iteration); execute vs skip both feed interpret;
+    # safeguard vs interpret both feed redirect/conclude on different branches.
+    _g_writer_gen = "fanin_writer_generate"
+    _g_interpret = "fanin_writer_interpret"
+    _g_redirect = "fanin_commander_redirect"
+    _g_conclude = "fanin_commander_conclude"
+
     b.add_edge(receive, pass_w)
-    b.add_edge(pass_w, writer_gen)
+    b.add_edge(pass_w, writer_gen, activation_group=_g_writer_gen, activation_condition="any")
     b.add_edge(writer_gen, recv_code)
     b.add_edge(recv_code, sg)
 
@@ -981,8 +1015,8 @@ def _build_coding_graph_flow(
         return (not ctx.safeguard_allowed) and (ctx.attempt + 1 >= ctx.max_iterations)
 
     b.add_edge(sg, decide, condition=_safeguard_ok)
-    b.add_edge(sg, redirect, condition=_safeguard_retry)
-    b.add_edge(sg, conclude, condition=_safeguard_terminal)
+    b.add_edge(sg, redirect, condition=_safeguard_retry, activation_group=_g_redirect, activation_condition="any")
+    b.add_edge(sg, conclude, condition=_safeguard_terminal, activation_group=_g_conclude, activation_condition="any")
 
     def _needs_exec(_msg: BaseChatMessage) -> bool:
         return ctx.requires_execution
@@ -992,8 +1026,8 @@ def _build_coding_graph_flow(
 
     b.add_edge(decide, execute, condition=_needs_exec)
     b.add_edge(decide, skip_ex, condition=_skip_exec)
-    b.add_edge(execute, interpret)
-    b.add_edge(skip_ex, interpret)
+    b.add_edge(execute, interpret, activation_group=_g_interpret, activation_condition="any")
+    b.add_edge(skip_ex, interpret, activation_group=_g_interpret, activation_condition="any")
 
     def _retry_after_bad_run(_msg: BaseChatMessage) -> bool:
         return bool(ctx.execution_error) and ctx.requires_execution and (ctx.attempt + 1 < ctx.max_iterations)
@@ -1003,10 +1037,10 @@ def _build_coding_graph_flow(
             bool(ctx.execution_error) and ctx.requires_execution and (ctx.attempt + 1 < ctx.max_iterations)
         )
 
-    b.add_edge(interpret, redirect, condition=_retry_after_bad_run)
-    b.add_edge(interpret, conclude, condition=_finish_iteration)
+    b.add_edge(interpret, redirect, condition=_retry_after_bad_run, activation_group=_g_redirect, activation_condition="any")
+    b.add_edge(interpret, conclude, condition=_finish_iteration, activation_group=_g_conclude, activation_condition="any")
 
-    b.add_edge(redirect, writer_gen)
+    b.add_edge(redirect, writer_gen, activation_group=_g_writer_gen, activation_condition="any")
 
     b.set_entry_point(receive)
     graph = b.build()
@@ -1054,11 +1088,7 @@ class AutoGenCodingMAS(CodingMASBase):
         self.begin_conversation_log(query)
         wall_t0 = time.perf_counter()
         api_key = os.getenv("OPENAI_API_KEY") or ""
-        self._model_client = OpenAIChatCompletionClient(
-            model=self._model_id,
-            api_key=api_key,
-            temperature=0,
-        )
+        self._model_client = _openai_chat_client(self._model_id, api_key)
         commander = CommanderAgent(self._model_client)
         writer = WriterAgent(self._model_client)
         safeguard = SafeguardAgent(self._model_client)

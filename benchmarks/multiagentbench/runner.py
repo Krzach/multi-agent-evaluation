@@ -12,18 +12,9 @@ class MultiAgentBenchRunner(BenchmarkRunner):
     """
 
 
-    def evaluate(
-        self,
-        dataset: List[Dict[str, Any]],
-        *,
-        include_delta_overhead: bool = False,
-    ):
+    def evaluate(self, dataset: List[Dict[str, Any]]):
         """
         Evaluates the MAS against a suite of tasks.
-
-        Args:
-            include_delta_overhead: If True, runs an extra single-agent LLM call per task
-                for delta overhead metrics (adds API cost/latency).
         """
         results = []
         for task in dataset:
@@ -77,11 +68,8 @@ class MultiAgentBenchRunner(BenchmarkRunner):
             conversation_log_path = mas_output.get("conversation_log_path")
 
             communication_overhead_metrics = build_overhead_envelope(
-                self.mas,
-                task_input,
                 mas_output,
                 total_task_time,
-                include_delta_overhead=include_delta_overhead,
             )
 
             # Calculate Conversation Turns / Messages between agents

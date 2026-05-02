@@ -2,7 +2,6 @@ import logging
 import time
 from typing import List, Dict, Any
 
-from coding_scenario.base import CodingMASBase
 from benchmarks.base import BenchmarkRunner
 from metrics.communication_overhead import build_overhead_envelope
 
@@ -12,19 +11,10 @@ class HumanEvalRunner(BenchmarkRunner):
     Integrates the HumanEval benchmark to evaluate coding tasks across different agent frameworks.
     """
 
-    def evaluate(
-        self,
-        dataset: List[Dict[str, Any]],
-        *,
-        include_delta_overhead: bool = False,
-    ):
+    def evaluate(self, dataset: List[Dict[str, Any]]):
         """
         Loops through the HumanEval dataset, passes the prompt to the MAS,
         and evaluates the correctness by executing the test cases.
-
-        Args:
-            include_delta_overhead: If True, runs an extra single-agent LLM call per task
-                to populate delta-vs-baseline overhead (adds API cost/latency).
         """
         results = []
         for item in dataset:
@@ -67,11 +57,8 @@ class HumanEvalRunner(BenchmarkRunner):
             total_task_time = end_time - start_time
 
             communication_overhead_metrics = build_overhead_envelope(
-                self.mas,
-                task_input,
                 mas_output,
                 total_task_time,
-                include_delta_overhead=include_delta_overhead,
             )
 
             # Calculate Collaboration Metrics

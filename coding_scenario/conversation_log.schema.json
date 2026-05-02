@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://multi-agent-evaluation.local/schemas/conversation_log.schema.json",
   "title": "CodingMAS Conversation Log Record",
-  "description": "Schema for one JSONL line in logs/mas_conversations/*.jsonl.",
+  "description": "Schema for one JSONL line in logs/mas_conversations/*.jsonl. v1.1 adds overhead attribution fields on events.",
   "oneOf": [
     {
       "type": "object",
@@ -24,7 +24,11 @@
         "framework": { "type": "string" },
         "model_id": { "type": "string" },
         "max_iterations": { "type": "integer", "minimum": 1 },
-        "user_query": { "type": "string" }
+        "user_query": { "type": "string" },
+        "framework_mode": {
+          "type": "string",
+          "description": "e.g. production, mock"
+        }
       },
       "additionalProperties": false
     },
@@ -50,6 +54,28 @@
           "type": "string",
           "enum": ["agent_output", "action", "pass", "state", "error", "final"]
         },
+        "event_name": {
+          "type": "string",
+          "description": "Stable step id, e.g. pass_to_writer, safeguard_review"
+        },
+        "phase": {
+          "type": "string",
+          "enum": ["coordination", "generation", "execution", "finalization"]
+        },
+        "duration_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall time for this step when measured"
+        },
+        "token_usage": {
+          "type": "object",
+          "properties": {
+            "prompt_tokens": { "type": "integer", "minimum": 0 },
+            "completion_tokens": { "type": "integer", "minimum": 0 },
+            "total_tokens": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
         "actor": { "type": "string" },
         "target": { "type": ["string", "null"] },
         "payload": { "type": "object" }
@@ -72,7 +98,12 @@
         "session_id": { "type": "string" },
         "timestamp": { "type": "string", "format": "date-time" },
         "total_events": { "type": "integer", "minimum": 0 },
-        "final_answer_preview": { "type": "string" }
+        "final_answer_preview": { "type": "string" },
+        "mas_total_duration_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional wall-clock for full answer() call"
+        }
       },
       "additionalProperties": false
     }

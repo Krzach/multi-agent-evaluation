@@ -98,6 +98,16 @@ class EventMetricsAggregator:
     def events(self) -> List[Dict[str, Any]]:
         return [record for record in self.records if record.get("record_type") == "event"]
 
+    def agent_message_count(self) -> int:
+        """Count explicit inter-agent message events in the log."""
+        count = 0
+        for event in self.events:
+            actor = event.get("actor")
+            target = event.get("target")
+            if isinstance(actor, str) and isinstance(target, str) and actor and target:
+                count += 1
+        return count
+
     @staticmethod
     def _token_total(usage: Any) -> int:
         if not isinstance(usage, dict):
@@ -181,6 +191,7 @@ class EventMetricsAggregator:
             "total_event_duration_ms": self.sum_wall_duration_ms(),
             "total_time_duration_ms": self.sum_time_duration_ms(),
             "total_llm_api_duration_ms": self.sum_llm_api_duration_ms(),
+            "messages_between_agents": self.agent_message_count(),
         }
 
 

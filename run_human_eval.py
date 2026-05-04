@@ -4,6 +4,7 @@ import argparse
 from dotenv import load_dotenv
 
 from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
+from coding_scenario.autogen.autogen_mas import AutoGenCodingMAS
 from benchmarks.human_eval.dataset import HumanEvalDataset
 from benchmarks.human_eval.runner import HumanEvalRunner
 
@@ -26,6 +27,12 @@ def parse_args():
         "--output",
         default="humaneval_results.json",
         help="Path to save evaluation results JSON.",
+    )
+    parser.add_argument(
+        "--framework",
+        default="langchain",
+        choices=["langchain", "autogen"],
+        help="Framework to use for the evaluation.",
     )
     return parser.parse_args()
 
@@ -53,14 +60,15 @@ def main():
         return
 
     # 2. Initialize the real Agent System
-    model_id = args.model
-    max_iterations = args.max_iterations
-    print(
-        f"Initializing LangchainCodingMAS with model: {model_id} "
-        f"(max iterations: {max_iterations})"
-    )
-    
-    mas = LangchainCodingMAS(model_id=model_id, max_iterations=max_iterations)
+    if args.framework == "langchain":
+        mas = LangchainCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
+    elif args.framework == "autogen":
+        if args.model == "gpt-5.4":
+            args.model = "gpt-5.4-2026-03-05"
+        mas = AutoGenCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
+    else:
+        print(f"Invalid framework: {args.framework}")
+        return
 
     # 3. Initialize the Runner
     runner = HumanEvalRunner(mas_instance=mas)

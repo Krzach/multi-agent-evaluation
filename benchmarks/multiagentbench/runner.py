@@ -70,6 +70,7 @@ class MultiAgentBenchRunner(BenchmarkRunner):
             conversation_log_metrics = build_conversation_log_metrics_envelope(
                 mas_output,
                 total_task_time,
+                framework_class_name=self.mas.__class__.__name__,
             )
 
             # Calculate Conversation Turns / Messages between agents

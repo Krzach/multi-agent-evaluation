@@ -6,11 +6,13 @@ inside the provider call (``llm_api_duration_ms``). The remainder
 (prompt assembly, parsing, graph state updates)—exposed in JSON as ``time_duration_ms`` and
 ``time_share_of_task_wall`` on each ``aggregate_agents.by_agent`` entry, not "overhead".
 
-**Between-node** gaps for the LangGraph coding MAS come from ``TimeBetweenNodesCallback``
-(``coding_scenario/langchain/callbacks/time_between_nodes.py``): elapsed time between the
-end of one graph node runnable and the start of the next, using ``langgraph_node`` callback
-metadata. Other MAS builds omit ``langgraph_between_nodes_duration_ms`` on ``answer()``;
-those gaps are reported as **0** here.
+**Orchestration gap** totals use ``orchestration_gap_ms`` on ``answer()`` (see
+``coding_scenario.base.ORCHESTRATION_GAP_MS_KEY``); legacy logs may still read
+``langgraph_between_nodes_duration_ms``. For **LangGraph**, the value is from
+``TimeBetweenNodesCallback``: gaps between ``on_chain_end`` and the next ``on_chain_start``
+with ``langgraph_node`` metadata. For **AutoGen**, it is **manual** step-boundary gaps inside
+GraphFlow step agents. ``between_nodes_measurement_source`` in task-wall attribution reflects
+the MAS class when the benchmark passes it.
 """
 
 from __future__ import annotations
@@ -20,7 +22,37 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from coding_scenario.base import ORCHESTRATION_GAP_MS_KEY
+
 KNOWN_AGENTS = ("commander", "writer", "safeguard")
+
+_LEGACY_ORCHESTRATION_GAP_MS_KEY = "langgraph_between_nodes_duration_ms"
+
+
+def _orchestration_gap_ms_from_mas_output(mas_output: Dict[str, Any]) -> Optional[float]:
+    for key in (ORCHESTRATION_GAP_MS_KEY, _LEGACY_ORCHESTRATION_GAP_MS_KEY):
+        raw = mas_output.get(key)
+        if isinstance(raw, (int, float)):
+            return float(raw)
+    return None
+
+
+def _between_nodes_measurement_source(framework_class_name: Optional[str]) -> str:
+    """Human-readable provenance for ``orchestration_gap_ms`` on ``answer()``."""
+    if framework_class_name == "LangchainCodingMAS":
+        return (
+            "LangGraph TimeBetweenNodesCallback: wall time between on_chain_end and the next "
+            "on_chain_start for runs with langgraph_node metadata (orchestration gaps only)."
+        )
+    if framework_class_name == "AutoGenCodingMAS":
+        return (
+            "MAS custom step timer: perf_counter gaps between _mark_step_end and the next logged "
+            "step in GraphFlow agents; not LangGraph nodes or AutoGen core spans."
+        )
+    return (
+        "MAS-reported orchestration_gap_ms (or legacy langgraph_between_nodes_duration_ms); "
+        "semantics depend on the MAS implementation (pass framework_class_name for a precise label)."
+    )
 
 
 def _safe_int(value: Any) -> int:
@@ -157,6 +189,9 @@ class LogMetricsCalculator:
     records: List[Dict[str, Any]]
     mas_task_seconds: float
     between_nodes_duration_ms: float = 0.0
+    between_nodes_measurement_source: str = (
+        "MAS-reported orchestration_gap_ms when provided; semantics vary by implementation."
+    )
 
     def _session_wall_duration_ms(self) -> Optional[float]:
         for record in reversed(self.records):
@@ -209,9 +244,7 @@ class LogMetricsCalculator:
             "total_llm_api_time_seconds": total_llm_ms / 1000.0,
             "between_nodes_time_seconds": between_s,
             "between_nodes_share_of_task_wall": between_share,
-            "between_nodes_measurement_source": (
-                "langgraph_callback_perf_counter when provided by MAS output; else 0"
-            ),
+            "between_nodes_measurement_source": self.between_nodes_measurement_source,
             "session_end_wall_duration_ms": wall_duration_ms,
         }
 
@@ -240,14 +273,19 @@ def compute_conversation_log_metrics(
     log_path: Optional[str],
     mas_task_seconds: float,
     between_nodes_duration_ms: Optional[float] = None,
+    between_nodes_measurement_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build per-agent duration/token aggregates plus task-wall attribution from a log path."""
     records = load_conversation_log_records(log_path) if log_path else []
     bn_ms = float(between_nodes_duration_ms) if isinstance(between_nodes_duration_ms, (int, float)) else 0.0
+    bn_src = between_nodes_measurement_source or (
+        "MAS-reported orchestration_gap_ms when provided; semantics vary by implementation."
+    )
     calculation = LogMetricsCalculator(
         records=records,
         mas_task_seconds=mas_task_seconds,
         between_nodes_duration_ms=max(0.0, bn_ms),
+        between_nodes_measurement_source=bn_src,
     ).compute()
     return {"log_path": log_path, **calculation}
 
@@ -255,14 +293,14 @@ def compute_conversation_log_metrics(
 def build_conversation_log_metrics_envelope(
     mas_output: Dict[str, Any],
     mas_task_seconds: float,
+    *,
+    framework_class_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Benchmark helper: metrics dict from MAS ``answer()`` output plus runner wall time."""
-    raw_bn = mas_output.get("langgraph_between_nodes_duration_ms")
-    between_ms: Optional[float] = None
-    if isinstance(raw_bn, (int, float)):
-        between_ms = float(raw_bn)
+    between_ms = _orchestration_gap_ms_from_mas_output(mas_output)
     return compute_conversation_log_metrics(
         log_path=mas_output.get("conversation_log_path"),
         mas_task_seconds=mas_task_seconds,
         between_nodes_duration_ms=between_ms,
+        between_nodes_measurement_source=_between_nodes_measurement_source(framework_class_name),
     )

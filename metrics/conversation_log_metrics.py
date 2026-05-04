@@ -6,6 +6,13 @@ inside the provider call (``llm_api_duration_ms``). The remainder
 (prompt assembly, parsing, graph state updates)—exposed in JSON as ``time_duration_ms`` and
 ``time_share_of_task_wall`` on each ``aggregate_agents.by_agent`` entry, not "overhead".
 
+**Wall-time decomposition** (``wall_time_decomposition``): ``task_wall_ms`` minus summed
+logged **LLM** time and **local tool** time (``execute_code`` step durations) yields
+``residual_orchestration_ms`` (gaps between steps, logging, framework work not inside those
+spans). **Per-step residual** (``per_step_residual_overhead``) is per event
+``max(0, duration_ms - llm_api_duration_ms - tool_ms)`` where ``tool_ms`` is the full step wall
+time for ``execute_code`` events only.
+
 **Orchestration gap** totals use ``orchestration_gap_ms`` on ``answer()`` (see
 ``coding_scenario.base.ORCHESTRATION_GAP_MS_KEY``); legacy logs may still read
 ``langgraph_between_nodes_duration_ms``. For **LangGraph**, the value is from
@@ -18,11 +25,13 @@ the MAS class when the benchmark passes it.
 from __future__ import annotations
 
 import json
+import math
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
-from coding_scenario.base import ORCHESTRATION_GAP_MS_KEY
+from coding_scenario.base import EVENT_EXECUTE_CODE, ORCHESTRATION_GAP_MS_KEY
 
 KNOWN_AGENTS = ("commander", "writer", "safeguard")
 
@@ -53,6 +62,22 @@ def _between_nodes_measurement_source(framework_class_name: Optional[str]) -> st
         "MAS-reported orchestration_gap_ms (or legacy langgraph_between_nodes_duration_ms); "
         "semantics depend on the MAS implementation (pass framework_class_name for a precise label)."
     )
+
+
+def _percentile_linear(values: Sequence[float], pct: float) -> float:
+    """``pct`` in [0, 100]. Linear interpolation between closest ranks."""
+    xs = [float(x) for x in values if isinstance(x, (int, float))]
+    if not xs:
+        return 0.0
+    if len(xs) == 1:
+        return xs[0]
+    y = sorted(xs)
+    k = (len(y) - 1) * (pct / 100.0)
+    f = int(math.floor(k))
+    c = int(math.ceil(k))
+    if f >= c:
+        return y[f]
+    return y[f] * (c - k) + y[c] * (k - f)
 
 
 def _safe_int(value: Any) -> int:
@@ -178,6 +203,48 @@ class EventMetricsAggregator:
             "total_tokens": total_tokens if total_tokens else prompt_tokens + completion_tokens,
         }
 
+    def sum_tool_execution_duration_ms(self) -> float:
+        """Wall time attributed to local ``execute_code`` steps (no LLM in that span)."""
+        total = 0.0
+        for event in self.events:
+            if event.get("event_name") != EVENT_EXECUTE_CODE:
+                continue
+            d = event.get("duration_ms")
+            if isinstance(d, (int, float)):
+                total += float(d)
+        return total
+
+    def per_step_residual_overhead_stats(self) -> Dict[str, Any]:
+        """Per logged event: ``max(0, duration - llm - tool)`` where tool is full wall for execute_code."""
+        residuals: List[float] = []
+        for event in self.events:
+            wall = event.get("duration_ms")
+            if not isinstance(wall, (int, float)):
+                continue
+            wf = float(wall)
+            llm = self.llm_api_duration_ms_for_event(event)
+            tool_ms = wf if event.get("event_name") == EVENT_EXECUTE_CODE else 0.0
+            residuals.append(max(0.0, wf - llm - tool_ms))
+        n = len(residuals)
+        if n == 0:
+            return {
+                "events_with_duration_count": 0,
+                "total_step_residual_ms": 0.0,
+                "mean_step_residual_ms": 0.0,
+                "median_step_residual_ms": 0.0,
+                "p95_step_residual_ms": 0.0,
+                "max_step_residual_ms": 0.0,
+            }
+        total_r = float(sum(residuals))
+        return {
+            "events_with_duration_count": n,
+            "total_step_residual_ms": total_r,
+            "mean_step_residual_ms": total_r / n,
+            "median_step_residual_ms": float(statistics.median(residuals)),
+            "p95_step_residual_ms": _percentile_linear(residuals, 95.0),
+            "max_step_residual_ms": float(max(residuals)),
+        }
+
     def aggregate(self) -> Dict[str, Any]:
         by_agent: Dict[str, Any] = {}
         for ag in (*KNOWN_AGENTS, "other"):
@@ -260,14 +327,47 @@ class LogMetricsCalculator:
         }
 
     def compute(self) -> Dict[str, Any]:
-        aggregate = EventMetricsAggregator(self.records).aggregate()
+        aggregator = EventMetricsAggregator(self.records)
+        aggregate = aggregator.aggregate()
         aggregate["between_nodes_duration_ms"] = float(self.between_nodes_duration_ms)
         wall_duration_ms = self._session_wall_duration_ms()
         denom_s = self._task_wall_denominator_seconds(aggregate, wall_duration_ms)
         self._apply_agent_shares_of_task_wall(aggregate, denom_s)
+
+        total_llm_ms = float(aggregate.get("total_llm_api_duration_ms", 0.0))
+        total_tool_ms = aggregator.sum_tool_execution_duration_ms()
+        per_step = aggregator.per_step_residual_overhead_stats()
+
+        task_wall_ms = 0.0
+        task_wall_source = "none"
+        if self.mas_task_seconds > 0:
+            task_wall_ms = self.mas_task_seconds * 1000.0
+            task_wall_source = "runner_mas_task_seconds"
+        elif wall_duration_ms is not None and wall_duration_ms > 0:
+            task_wall_ms = float(wall_duration_ms)
+            task_wall_source = "session_end_mas_total_duration_ms"
+        else:
+            ev_sum = float(aggregate.get("total_event_duration_ms", 0.0))
+            if ev_sum > 0:
+                task_wall_ms = ev_sum
+                task_wall_source = "sum_event_duration_ms_fallback"
+
+        residual_ms = max(0.0, task_wall_ms - total_llm_ms - total_tool_ms)
+        residual_share = (residual_ms / task_wall_ms) if task_wall_ms > 0 else 0.0
+        wall_time_decomposition: Dict[str, Any] = {
+            "task_wall_ms": task_wall_ms,
+            "task_wall_source": task_wall_source,
+            "measured_llm_api_ms": total_llm_ms,
+            "measured_tool_execution_ms": total_tool_ms,
+            "residual_orchestration_ms": residual_ms,
+            "residual_orchestration_share_of_task_wall": residual_share,
+        }
+
         return {
             "task_wall_attribution": self.build_task_wall_attribution(aggregate, wall_duration_ms),
             "aggregate_agents": aggregate,
+            "wall_time_decomposition": wall_time_decomposition,
+            "per_step_residual_overhead": per_step,
         }
 
 

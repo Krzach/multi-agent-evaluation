@@ -154,7 +154,11 @@ def parse_args() -> argparse.Namespace:
         default="results.md",
         help="Markdown report path (default: results.md).",
     )
-    p.add_argument("--save-json", default="", help="Optional path to write all raw run JSON.")
+    p.add_argument(
+        "--save-json",
+        default="results/cross_framework_results.json",
+        help="Path to write aggregated raw run JSON (default: results/cross_framework_results.json).",
+    )
     return p.parse_args()
 
 
@@ -188,18 +192,26 @@ def main() -> None:
                 row = runner.evaluate([task])[0]
                 records.append(RunRecord(framework=fw, task_id=tid, repeat=rep, result=row))
 
-    if args.save_json:
-        payload = [
-            {
-                "framework": r.framework,
-                "task_id": r.task_id,
-                "repeat": r.repeat,
-                **r.result,
-            }
-            for r in records
-        ]
-        Path(args.save_json).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"\nWrote raw runs to {args.save_json}")
+    payload = [
+        {
+            "framework": r.framework,
+            "task_id": r.task_id,
+            "repeat": r.repeat,
+            **r.result,
+        }
+        for r in records
+    ]
+    json_path = Path(args.save_json)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"\nWrote raw runs to {json_path}")
+    raw_runs = json.loads(json_path.read_text(encoding="utf-8"))
+
+    frameworks_for_report = [
+        fw for fw in frameworks if any(str(r.get("framework", "")) == fw for r in raw_runs)
+    ]
+    if not frameworks_for_report:
+        frameworks_for_report = list(frameworks)
 
     summary_headers = [
         "framework",
@@ -214,6 +226,25 @@ def main() -> None:
         "between-node (s)",
     ]
     summary_rows: List[List[str]] = []
+
+    token_headers = [
+        "framework",
+        "runs",
+        "input tokens",
+        "output tokens",
+        "total tokens",
+    ]
+    token_rows: List[List[str]] = []
+
+    collab_headers = [
+        "framework",
+        "runs",
+        "conversation iterations",
+        "messages between agents",
+        "activated agents",
+        "safeguard blocked %",
+    ]
+    collab_rows: List[List[str]] = []
 
     wall_decomp_headers = [
         "framework",
@@ -236,12 +267,17 @@ def main() -> None:
     ]
     per_step_rows: List[List[str]] = []
 
-    for fw in frameworks:
-        subset = [r.result for r in records if r.framework == fw]
+    for fw in frameworks_for_report:
+        subset = [r for r in raw_runs if str(r.get("framework", "")) == fw]
         correct = [float(_pick(s, "correctness")) for s in subset]
         times = [_pick(s, "time_metrics", "total_task_completion_time_seconds") for s in subset]
+        toks_in = [_pick(s, "cost_metrics", "input_tokens") for s in subset]
+        toks_out = [_pick(s, "cost_metrics", "output_tokens") for s in subset]
         toks = [_pick(s, "cost_metrics", "total_tokens") for s in subset]
+        iters = [_pick(s, "collaboration_metrics", "conversation_iterations") for s in subset]
         msgs = [_pick(s, "collaboration_metrics", "messages_between_agents") for s in subset]
+        activated = [_pick(s, "collaboration_metrics", "activated_agents") for s in subset]
+        blocked = [float(_pick(s, "collaboration_metrics", "safeguard_blocked")) for s in subset]
         llm_w = [_llm_wall_seconds(s) for s in subset]
         btw = [_between_nodes_seconds(s) for s in subset]
 
@@ -264,6 +300,33 @@ def main() -> None:
                 _format_stat(ms, precision=1, unit=""),
                 _format_stat(lw, unit=""),
                 _format_stat(bw, unit=""),
+            ]
+        )
+
+        tk_in = _summarize(toks_in)
+        tk_out = _summarize(toks_out)
+        token_rows.append(
+            [
+                fw,
+                str(len(subset)),
+                _format_stat(tk_in, precision=0, unit=""),
+                _format_stat(tk_out, precision=0, unit=""),
+                _format_stat(tk, precision=0, unit=""),
+            ]
+        )
+
+        st_it = _summarize(iters)
+        st_msg = _summarize(msgs)
+        st_act = _summarize(activated)
+        blocked_pct = 100.0 * (statistics.mean(blocked) if blocked else 0.0)
+        collab_rows.append(
+            [
+                fw,
+                str(len(subset)),
+                _format_stat(st_it, precision=2, unit=""),
+                _format_stat(st_msg, precision=2, unit=""),
+                _format_stat(st_act, precision=2, unit=""),
+                f"{blocked_pct:.1f}",
             ]
         )
 
@@ -310,7 +373,7 @@ def main() -> None:
 
     per_task_headers = ["task_id"] + [
         h
-        for fw in frameworks
+        for fw in frameworks_for_report
         for h in (f"{fw} pass %", f"{fw} time (s)", f"{fw} tokens")
     ]
     per_task_rows: List[List[str]] = []
@@ -318,8 +381,12 @@ def main() -> None:
     for task in tasks:
         tid = str(task.get("task_id", ""))
         row_cells: List[str] = [tid]
-        for fw in frameworks:
-            sub = [r.result for r in records if r.framework == fw and r.task_id == tid]
+        for fw in frameworks_for_report:
+            sub = [
+                r
+                for r in raw_runs
+                if str(r.get("framework", "")) == fw and str(r.get("task_id", "")) == tid
+            ]
             if not sub:
                 row_cells.extend(["—", "—", "—"])
                 continue
@@ -341,10 +408,17 @@ def main() -> None:
         f"- **Repeats per task (per framework):** {args.repeats}",
         f"- **Model:** `{args.model}`",
         f"- **Max iterations:** {args.max_iterations}",
+        f"- **Raw results JSON:** `{json_path}`",
         "",
         "## Overall (all tasks × repeats)",
         "",
         markdown_table(summary_headers, summary_rows),
+        "## Token breakdown (mean ± stdev over runs)",
+        "",
+        markdown_table(token_headers, token_rows),
+        "## Collaboration metrics (mean ± stdev over runs)",
+        "",
+        markdown_table(collab_headers, collab_rows),
         "## Wall-time decomposition (mean ± stdev over runs)",
         "",
         "Task wall is runner `answer()` wall time when available; residual = task wall − logged LLM time − logged `execute_code` duration.",

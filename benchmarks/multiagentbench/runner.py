@@ -73,13 +73,18 @@ class MultiAgentBenchRunner(BenchmarkRunner):
                 framework_class_name=self.mas.__class__.__name__,
             )
 
-            # Calculate Conversation Turns / Messages between agents
-            # Based on workflow.md and langchain_mas.py:
-            # 1 iteration = Commander -> Writer (1) + Writer -> Commander (1) + Commander -> Safeguard (1) + Safeguard -> Commander (1)
-            # This is roughly 4 messages per attempt, plus the final interpretation/conclusion steps.
-            messages_per_attempt = 4
-            base_messages = 2 # Initial receive + Final conclude
-            total_messages = base_messages + ((attempts + 1) * messages_per_attempt)
+            # Collaboration metric: prefer measured inter-agent messages from log, fallback to heuristic.
+            measured_messages = int(
+                conversation_log_metrics
+                .get("aggregate_agents", {})
+                .get("messages_between_agents", 0)
+            )
+            if measured_messages > 0:
+                total_messages = measured_messages
+            else:
+                messages_per_attempt = 4
+                base_messages = 2  # Initial receive + Final conclude
+                total_messages = base_messages + ((attempts + 1) * messages_per_attempt)
             
             # Step 3: Verify output using assertion
             is_correct = False

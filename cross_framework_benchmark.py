@@ -70,6 +70,29 @@ def _between_nodes_seconds(res: Dict[str, Any]) -> float:
     return float(tw.get("between_nodes_time_seconds") or 0.0)
 
 
+def _wall_decomposition(res: Dict[str, Any]) -> Dict[str, float]:
+    d = (res.get("conversation_log_metrics") or {}).get("wall_time_decomposition") or {}
+    return {
+        "task_wall_s": float(d.get("task_wall_ms", 0)) / 1000.0,
+        "llm_s": float(d.get("measured_llm_api_ms", 0)) / 1000.0,
+        "tool_s": float(d.get("measured_tool_execution_ms", 0)) / 1000.0,
+        "residual_s": float(d.get("residual_orchestration_ms", 0)) / 1000.0,
+        "residual_share": float(d.get("residual_orchestration_share_of_task_wall", 0)),
+    }
+
+
+def _per_step_residual(res: Dict[str, Any]) -> Dict[str, float]:
+    p = (res.get("conversation_log_metrics") or {}).get("per_step_residual_overhead") or {}
+    return {
+        "events_n": float(p.get("events_with_duration_count", 0)),
+        "mean_ms": float(p.get("mean_step_residual_ms", 0)),
+        "median_ms": float(p.get("median_step_residual_ms", 0)),
+        "p95_ms": float(p.get("p95_step_residual_ms", 0)),
+        "max_ms": float(p.get("max_step_residual_ms", 0)),
+        "total_ms": float(p.get("total_step_residual_ms", 0)),
+    }
+
+
 @dataclass
 class RunRecord:
     framework: str
@@ -131,7 +154,11 @@ def parse_args() -> argparse.Namespace:
         default="results.md",
         help="Markdown report path (default: results.md).",
     )
-    p.add_argument("--save-json", default="", help="Optional path to write all raw run JSON.")
+    p.add_argument(
+        "--save-json",
+        default="results/cross_framework_results.json",
+        help="Path to write aggregated raw run JSON (default: results/cross_framework_results.json).",
+    )
     return p.parse_args()
 
 
@@ -165,18 +192,26 @@ def main() -> None:
                 row = runner.evaluate([task])[0]
                 records.append(RunRecord(framework=fw, task_id=tid, repeat=rep, result=row))
 
-    if args.save_json:
-        payload = [
-            {
-                "framework": r.framework,
-                "task_id": r.task_id,
-                "repeat": r.repeat,
-                **r.result,
-            }
-            for r in records
-        ]
-        Path(args.save_json).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"\nWrote raw runs to {args.save_json}")
+    payload = [
+        {
+            "framework": r.framework,
+            "task_id": r.task_id,
+            "repeat": r.repeat,
+            **r.result,
+        }
+        for r in records
+    ]
+    json_path = Path(args.save_json)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"\nWrote raw runs to {json_path}")
+    raw_runs = json.loads(json_path.read_text(encoding="utf-8"))
+
+    frameworks_for_report = [
+        fw for fw in frameworks if any(str(r.get("framework", "")) == fw for r in raw_runs)
+    ]
+    if not frameworks_for_report:
+        frameworks_for_report = list(frameworks)
 
     summary_headers = [
         "framework",
@@ -192,12 +227,57 @@ def main() -> None:
     ]
     summary_rows: List[List[str]] = []
 
-    for fw in frameworks:
-        subset = [r.result for r in records if r.framework == fw]
+    token_headers = [
+        "framework",
+        "runs",
+        "input tokens",
+        "output tokens",
+        "total tokens",
+    ]
+    token_rows: List[List[str]] = []
+
+    collab_headers = [
+        "framework",
+        "runs",
+        "conversation iterations",
+        "messages between agents",
+        "activated agents",
+        "safeguard blocked %",
+    ]
+    collab_rows: List[List[str]] = []
+
+    wall_decomp_headers = [
+        "framework",
+        "runs",
+        "task wall (s)",
+        "LLM (s)",
+        "tool exec (s)",
+        "residual orch (s)",
+        "residual share",
+    ]
+    wall_decomp_rows: List[List[str]] = []
+
+    per_step_headers = [
+        "framework",
+        "runs",
+        "events / run",
+        "step resid mean (ms)",
+        "step resid p95 (ms)",
+        "step resid max (ms)",
+    ]
+    per_step_rows: List[List[str]] = []
+
+    for fw in frameworks_for_report:
+        subset = [r for r in raw_runs if str(r.get("framework", "")) == fw]
         correct = [float(_pick(s, "correctness")) for s in subset]
         times = [_pick(s, "time_metrics", "total_task_completion_time_seconds") for s in subset]
+        toks_in = [_pick(s, "cost_metrics", "input_tokens") for s in subset]
+        toks_out = [_pick(s, "cost_metrics", "output_tokens") for s in subset]
         toks = [_pick(s, "cost_metrics", "total_tokens") for s in subset]
+        iters = [_pick(s, "collaboration_metrics", "conversation_iterations") for s in subset]
         msgs = [_pick(s, "collaboration_metrics", "messages_between_agents") for s in subset]
+        activated = [_pick(s, "collaboration_metrics", "activated_agents") for s in subset]
+        blocked = [float(_pick(s, "collaboration_metrics", "safeguard_blocked")) for s in subset]
         llm_w = [_llm_wall_seconds(s) for s in subset]
         btw = [_between_nodes_seconds(s) for s in subset]
 
@@ -223,9 +303,77 @@ def main() -> None:
             ]
         )
 
+        tk_in = _summarize(toks_in)
+        tk_out = _summarize(toks_out)
+        token_rows.append(
+            [
+                fw,
+                str(len(subset)),
+                _format_stat(tk_in, precision=0, unit=""),
+                _format_stat(tk_out, precision=0, unit=""),
+                _format_stat(tk, precision=0, unit=""),
+            ]
+        )
+
+        st_it = _summarize(iters)
+        st_msg = _summarize(msgs)
+        st_act = _summarize(activated)
+        blocked_pct = 100.0 * (statistics.mean(blocked) if blocked else 0.0)
+        collab_rows.append(
+            [
+                fw,
+                str(len(subset)),
+                _format_stat(st_it, precision=2, unit=""),
+                _format_stat(st_msg, precision=2, unit=""),
+                _format_stat(st_act, precision=2, unit=""),
+                f"{blocked_pct:.1f}",
+            ]
+        )
+
+        wd_task = [_wall_decomposition(s)["task_wall_s"] for s in subset]
+        wd_llm = [_wall_decomposition(s)["llm_s"] for s in subset]
+        wd_tool = [_wall_decomposition(s)["tool_s"] for s in subset]
+        wd_res = [_wall_decomposition(s)["residual_s"] for s in subset]
+        wd_shr = [_wall_decomposition(s)["residual_share"] for s in subset]
+        st_task = _summarize(wd_task)
+        st_llm = _summarize(wd_llm)
+        st_tool = _summarize(wd_tool)
+        st_res = _summarize(wd_res)
+        st_shr = _summarize(wd_shr)
+        wall_decomp_rows.append(
+            [
+                fw,
+                str(len(subset)),
+                _format_stat(st_task, unit=""),
+                _format_stat(st_llm, unit=""),
+                _format_stat(st_tool, unit=""),
+                _format_stat(st_res, unit=""),
+                _format_stat(st_shr, precision=3, unit=""),
+            ]
+        )
+
+        ps_n = [_per_step_residual(s)["events_n"] for s in subset]
+        ps_mean = [_per_step_residual(s)["mean_ms"] for s in subset]
+        ps_p95 = [_per_step_residual(s)["p95_ms"] for s in subset]
+        ps_max = [_per_step_residual(s)["max_ms"] for s in subset]
+        sn = _summarize(ps_n)
+        sm = _summarize(ps_mean)
+        s95 = _summarize(ps_p95)
+        smx = _summarize(ps_max)
+        per_step_rows.append(
+            [
+                fw,
+                str(len(subset)),
+                _format_stat(sn, precision=1, unit=""),
+                _format_stat(sm, precision=2, unit=""),
+                _format_stat(s95, precision=2, unit=""),
+                _format_stat(smx, precision=2, unit=""),
+            ]
+        )
+
     per_task_headers = ["task_id"] + [
         h
-        for fw in frameworks
+        for fw in frameworks_for_report
         for h in (f"{fw} pass %", f"{fw} time (s)", f"{fw} tokens")
     ]
     per_task_rows: List[List[str]] = []
@@ -233,8 +381,12 @@ def main() -> None:
     for task in tasks:
         tid = str(task.get("task_id", ""))
         row_cells: List[str] = [tid]
-        for fw in frameworks:
-            sub = [r.result for r in records if r.framework == fw and r.task_id == tid]
+        for fw in frameworks_for_report:
+            sub = [
+                r
+                for r in raw_runs
+                if str(r.get("framework", "")) == fw and str(r.get("task_id", "")) == tid
+            ]
             if not sub:
                 row_cells.extend(["—", "—", "—"])
                 continue
@@ -256,10 +408,27 @@ def main() -> None:
         f"- **Repeats per task (per framework):** {args.repeats}",
         f"- **Model:** `{args.model}`",
         f"- **Max iterations:** {args.max_iterations}",
+        f"- **Raw results JSON:** `{json_path}`",
         "",
         "## Overall (all tasks × repeats)",
         "",
         markdown_table(summary_headers, summary_rows),
+        "## Token breakdown (mean ± stdev over runs)",
+        "",
+        markdown_table(token_headers, token_rows),
+        "## Collaboration metrics (mean ± stdev over runs)",
+        "",
+        markdown_table(collab_headers, collab_rows),
+        "## Wall-time decomposition (mean ± stdev over runs)",
+        "",
+        "Task wall is runner `answer()` wall time when available; residual = task wall − logged LLM time − logged `execute_code` duration.",
+        "",
+        markdown_table(wall_decomp_headers, wall_decomp_rows),
+        "## Per-step residual overhead (within-run stats, then mean ± stdev across runs)",
+        "",
+        "Per logged event with `duration_ms`: `max(0, duration − llm_api − tool)`; `tool` is full step time for `execute_code` only.",
+        "",
+        markdown_table(per_step_headers, per_step_rows),
         "## Per-task (mean over repeats)",
         "",
         markdown_table(per_task_headers, per_task_rows),
@@ -267,6 +436,9 @@ def main() -> None:
         "",
         "- **pass %:** fraction of repeats that passed × 100.",
         "- **time / tokens:** mean ± sample stdev when repeats ≥ 2; otherwise mean only.",
+        "- **msgs:** `collaboration_metrics.messages_between_agents` (log-derived inter-agent events when available).",
+        "- **LLM wall / between-node:** from `conversation_log_metrics` (summed LLM ms; LangGraph/MAS gap callback).",
+        "- **Wall-time decomposition / per-step residual:** from `conversation_log_metrics` JSONL-derived fields.",
         "",
     ]
     report = "\n".join(md_lines)

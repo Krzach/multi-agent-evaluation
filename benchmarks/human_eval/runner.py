@@ -62,10 +62,14 @@ class HumanEvalRunner(BenchmarkRunner):
                 framework_class_name=self.mas.__class__.__name__,
             )
 
-            # Calculate Collaboration Metrics
-            messages_per_attempt = 4
-            base_messages = 2 
-            total_messages = base_messages + ((attempts + 1) * messages_per_attempt)
+            # Collaboration metric: prefer measured inter-agent messages from log, fallback to heuristic.
+            measured_messages = int(
+                conversation_log_metrics
+                .get("aggregate_agents", {})
+                .get("messages_between_agents", 0)
+            )
+            total_messages = measured_messages
+            
             
             # Basic cleanup: if the agent outputs markdown code blocks, extract the code
             clean_code = generated_code

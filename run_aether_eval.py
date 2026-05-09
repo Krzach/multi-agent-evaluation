@@ -1,0 +1,151 @@
+import os
+import json
+import argparse
+import subprocess
+from dotenv import load_dotenv
+
+from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
+from coding_scenario.autogen.autogen_mas import AutoGenCodingMAS
+from benchmarks.aether_code.dataset import AetherCodeDataset
+from benchmarks.aether_code.runner import AetherCodeRunner
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run AetherCode on LangChain MAS.")
+    parser.add_argument("--model", default="gpt-5.4", help="Model id to use.")
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=10,
+        help="Maximum retry iterations inside MAS workflow.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="How many AetherCode tasks to run.",
+    )
+    parser.add_argument(
+        "--difficulty",
+        type=str,
+        default="Easy",
+        help="Filter tasks by difficulty (e.g. 'Easy', 'Medium', 'Hard').",
+    )
+    parser.add_argument(
+        "--output",
+        default="aethercode_results.json",
+        help="Path to save evaluation results JSON.",
+    )
+    parser.add_argument(
+        "--framework",
+        default="langchain",
+        choices=["langchain", "autogen"],
+        help="Framework to use for the evaluation.",
+    )
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+
+    # Load environment variables (e.g., OPENAI_API_KEY)
+    load_dotenv()
+    
+    if not os.getenv("OPENAI_API_KEY"):
+        print("Error: OPENAI_API_KEY environment variable not set.")
+        print("Please set it in your .env file or environment variables before running.")
+        return
+
+    # Ensure testlib.h is downloaded to avoid repeated downloads and testlib missing errors
+    if not os.path.exists("testlib.h"):
+        print("Downloading testlib.h...")
+        try:
+            subprocess.run(["wget", "-q", "-O", "testlib.h", "https://raw.githubusercontent.com/MikeMirzayanov/testlib/master/testlib.h"])
+        except Exception as e:
+            print(f"Failed to download testlib.h: {e}")
+
+    print("Initializing AetherCode Evaluation...")
+
+    # 1. Load the dataset (from huggingface datasets)
+    try:
+        dataset = AetherCodeDataset(split="test", difficulty=args.difficulty)
+        tasks = dataset.get_tasks(limit=args.limit)
+        print(f"Loaded {len(tasks)} tasks from AetherCode.")
+    except Exception as e:
+        print(f"Failed to load dataset: {e}")
+        print("Make sure you have installed 'datasets': pip install datasets")
+        return
+
+    # 2. Initialize the real Agent System
+    if args.framework == "langchain":
+        mas = LangchainCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
+    elif args.framework == "autogen":
+        if args.model == "gpt-5.4":
+            args.model = "gpt-5.4-2026-03-05"
+        mas = AutoGenCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
+    else:
+        print(f"Invalid framework: {args.framework}")
+        return
+
+    # 3. Initialize the Runner
+    runner = AetherCodeRunner(mas_instance=mas)
+
+    # 4. Run the Evaluation
+    print("Starting evaluation (this may take a few minutes)...")
+    results = runner.evaluate(tasks)
+
+    # 5. Output the results
+    print("\n" + "="*50)
+    print("EVALUATION RESULTS (AETHERCODE)")
+    print("="*50)
+    
+    total_correct = 0
+    total_time = 0
+    total_messages = 0
+    total_tokens = 0
+    
+    for res in results:
+        task_id = res['task_id']
+        correct = res['correctness'] == 1.0
+        
+        if correct:
+            total_correct += 1
+            
+        time_taken = res['time_metrics']['total_task_completion_time_seconds']
+        messages = res['collaboration_metrics']['messages_between_agents']
+        tokens = res['cost_metrics']['total_tokens']
+        
+        total_time += time_taken
+        total_messages += messages
+        total_tokens += tokens
+            
+        print(f"\nTask ID: {task_id}")
+        print(f"Correctness: {'PASSED' if correct else 'FAILED'}")
+        if not correct:
+            print(f"Error: {res['error']}")
+            
+        print(f"Time Taken: {time_taken:.2f}s")
+        print(f"Total Tokens: {tokens} (Prompt: {res['cost_metrics']['input_tokens']}, Completion: {res['cost_metrics']['output_tokens']})")
+        print(f"Conversation Turns: {res['collaboration_metrics']['conversation_iterations']}")
+        print(f"Messages Exchanged: {messages}")
+        print(f"Safeguard Blocked: {res['collaboration_metrics']['safeguard_blocked']}")
+        print(f"Final Code Preview:\n{res['generated_code'][:150]}...")
+        print("-" * 30)
+
+    accuracy = (total_correct / len(tasks)) * 100 if tasks else 0
+    avg_time = total_time / len(tasks) if tasks else 0
+    avg_messages = total_messages / len(tasks) if tasks else 0
+    avg_tokens = total_tokens / len(tasks) if tasks else 0
+    
+    print(f"\n--- SUMMARY ---")
+    print(f"Final Accuracy: {total_correct}/{len(tasks)} ({accuracy:.1f}%)")
+    print(f"Average Task Time: {avg_time:.2f}s")
+    print(f"Average Tokens per Task: {avg_tokens:.1f}")
+    print(f"Average Messages per Task: {avg_messages:.1f}")
+    
+    # Save detailed results to a JSON file
+    output_file = args.output
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    print(f"\nDetailed results saved to {output_file}")
+
+if __name__ == "__main__":
+    main()

@@ -98,10 +98,6 @@ class AetherCodeRunner(BenchmarkRunner):
                     if not test_cases:
                         error_message += " (Execution skipped due to lack of automated test cases in dataset)"
                     else:
-                        # Copy checker to current directory for inspection
-                        if checker_cpp:
-                            with open(f"checker_{task_id}.cpp", "w") as f:
-                                f.write(checker_cpp)
                                 
                         with tempfile.TemporaryDirectory() as tmpdir:
                             solution_path = os.path.join(tmpdir, "solution.py")

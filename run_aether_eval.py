@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
 from coding_scenario.autogen.autogen_mas import AutoGenCodingMAS
+from coding_scenario.single_agent_mas import SingleAgentMAS
 from benchmarks.aether_code.dataset import AetherCodeDataset
 from benchmarks.aether_code.runner import AetherCodeRunner
 
@@ -38,7 +39,7 @@ def parse_args():
     parser.add_argument(
         "--framework",
         default="langchain",
-        choices=["langchain", "autogen"],
+        choices=["langchain", "autogen", "single_agent"],
         help="Framework to use for the evaluation.",
     )
     return parser.parse_args()
@@ -81,6 +82,8 @@ def main():
         if args.model == "gpt-5.4":
             args.model = "gpt-5.4-2026-03-05"
         mas = AutoGenCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
+    elif args.framework == "single_agent":
+        mas = SingleAgentMAS(model_id=args.model, max_iterations=args.max_iterations)
     else:
         print(f"Invalid framework: {args.framework}")
         return

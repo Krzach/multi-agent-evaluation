@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
 from coding_scenario.autogen.autogen_mas import AutoGenCodingMAS
 from coding_scenario.single_agent_mas import SingleAgentMAS
+from coding_scenario.spade_mas import SpadeCodingMAS
 from benchmarks.aether_code.dataset import AetherCodeDataset
 from benchmarks.aether_code.runner import AetherCodeRunner
 
@@ -39,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--framework",
         default="langchain",
-        choices=["langchain", "autogen", "single_agent"],
+        choices=["langchain", "autogen", "single_agent", "spade"],
         help="Framework to use for the evaluation.",
     )
     return parser.parse_args()

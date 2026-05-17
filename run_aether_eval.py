@@ -85,6 +85,8 @@ def main():
         mas = AutoGenCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
     elif args.framework == "single_agent":
         mas = SingleAgentMAS(model_id=args.model, max_iterations=args.max_iterations)
+    elif args.framework == "spade":
+        mas = SpadeCodingMAS(model_id=args.model, max_iterations=args.max_iterations)
     else:
         print(f"Invalid framework: {args.framework}")
         return

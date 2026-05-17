@@ -16,6 +16,7 @@ from spade.message import Message
 from spade.behaviour import OneShotBehaviour
 
 from spade_llm import LLMAgent, LLMProvider
+import litellm
 
 from coding_scenario.base import (
     CodingMASBase,
@@ -46,6 +47,29 @@ from utils import (
 )
 
 load_dotenv()
+
+
+# Monkey-patch litellm.acompletion to intercept token usage globally
+# because spade_llm strips it out entirely from the response object
+_GLOBAL_PROMPT_TOKENS = 0
+_GLOBAL_COMPLETION_TOKENS = 0
+_GLOBAL_TOTAL_TOKENS = 0
+
+_original_acompletion = litellm.acompletion
+
+async def _tracked_acompletion(*args, **kwargs):
+    global _GLOBAL_PROMPT_TOKENS, _GLOBAL_COMPLETION_TOKENS, _GLOBAL_TOTAL_TOKENS
+    response = await _original_acompletion(*args, **kwargs)
+    try:
+        if hasattr(response, "usage") and response.usage:
+            _GLOBAL_PROMPT_TOKENS += getattr(response.usage, "prompt_tokens", 0)
+            _GLOBAL_COMPLETION_TOKENS += getattr(response.usage, "completion_tokens", 0)
+            _GLOBAL_TOTAL_TOKENS += getattr(response.usage, "total_tokens", 0)
+    except Exception:
+        pass
+    return response
+
+litellm.acompletion = _tracked_acompletion
 
 
 class CodingRunContext:
@@ -119,6 +143,10 @@ class SpadeCodingMAS(CodingMASBase):
         self._run_prompt_tokens = 0
         self._run_completion_tokens = 0
         self._run_total_tokens = 0
+        global _GLOBAL_PROMPT_TOKENS, _GLOBAL_COMPLETION_TOKENS, _GLOBAL_TOTAL_TOKENS
+        _GLOBAL_PROMPT_TOKENS = 0
+        _GLOBAL_COMPLETION_TOKENS = 0
+        _GLOBAL_TOTAL_TOKENS = 0
 
     def _accum_between_step_gap(self) -> None:
         if self._last_step_end_mono is None:
@@ -128,15 +156,8 @@ class SpadeCodingMAS(CodingMASBase):
     def _mark_step_end(self) -> None:
         self._last_step_end_mono = time.perf_counter()
 
-    def _record_usage(self, usage: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
-        if usage is None:
-            return None
-        self._run_prompt_tokens += int(usage.get("prompt_tokens", 0))
-        self._run_completion_tokens += int(usage.get("completion_tokens", 0))
-        self._run_total_tokens += int(usage.get("total_tokens", 0))
-        return usage
-
     async def _workflow_logic(self, behav: OneShotBehaviour):
+        global _GLOBAL_PROMPT_TOKENS, _GLOBAL_COMPLETION_TOKENS, _GLOBAL_TOTAL_TOKENS
         ctx = behav.agent.ctx
         mas = ctx.mas
 
@@ -149,6 +170,8 @@ class SpadeCodingMAS(CodingMASBase):
         ctx.safeguard_reason = ""
         ctx.requires_execution = True
         dur_ms = (time.perf_counter() - t0) * 1000.0
+        
+        # Log zero tokens for orchestrator logic step
         mas.log_conversation_event(
             event_type="action", actor="Commander", event_name=EVENT_RECEIVE_TASK,
             phase=PHASE_COORDINATION, duration_ms=dur_ms, payload={"step": EVENT_RECEIVE_TASK, "attempt": ctx.attempt}
@@ -171,17 +194,32 @@ class SpadeCodingMAS(CodingMASBase):
         msg = Message(to="commander@localhost")
         msg.set_metadata("message_type", "llm")
         msg.body = human
+        
+        prev_prompt = _GLOBAL_PROMPT_TOKENS
+        prev_comp = _GLOBAL_COMPLETION_TOKENS
+        prev_total = _GLOBAL_TOTAL_TOKENS
+        
         t_llm = time.perf_counter()
         await behav.send(msg)
         reply = await behav.receive(timeout=120)
         llm_ms = (time.perf_counter() - t_llm) * 1000.0
+        
+        tu = {
+            "prompt_tokens": _GLOBAL_PROMPT_TOKENS - prev_prompt,
+            "completion_tokens": _GLOBAL_COMPLETION_TOKENS - prev_comp,
+            "total_tokens": _GLOBAL_TOTAL_TOKENS - prev_total
+        }
+        mas._run_prompt_tokens += tu["prompt_tokens"]
+        mas._run_completion_tokens += tu["completion_tokens"]
+        mas._run_total_tokens += tu["total_tokens"]
 
         ctx.commander_context = reply.body if reply else ""
         node_ms = (time.perf_counter() - t_node) * 1000.0
         mas.log_conversation_event(
             event_type="pass", actor="Commander", target="Writer", event_name=EVENT_PASS_TO_WRITER,
             phase=PHASE_COORDINATION, duration_ms=node_ms, llm_api_duration_ms=llm_ms,
-            payload={"step": EVENT_PASS_TO_WRITER, "commander_context": ctx.commander_context}
+            payload={"step": EVENT_PASS_TO_WRITER, "commander_context": ctx.commander_context},
+            token_usage=tu
         )
         mas._mark_step_end()
 
@@ -200,10 +238,24 @@ class SpadeCodingMAS(CodingMASBase):
             msg = Message(to="writer@localhost")
             msg.set_metadata("message_type", "llm")
             msg.body = writer_prompt
+            
+            prev_prompt = _GLOBAL_PROMPT_TOKENS
+            prev_comp = _GLOBAL_COMPLETION_TOKENS
+            prev_total = _GLOBAL_TOTAL_TOKENS
+            
             t_llm = time.perf_counter()
             await behav.send(msg)
             reply = await behav.receive(timeout=120)
             llm_ms = (time.perf_counter() - t_llm) * 1000.0
+            
+            tu = {
+                "prompt_tokens": _GLOBAL_PROMPT_TOKENS - prev_prompt,
+                "completion_tokens": _GLOBAL_COMPLETION_TOKENS - prev_comp,
+                "total_tokens": _GLOBAL_TOTAL_TOKENS - prev_total
+            }
+            mas._run_prompt_tokens += tu["prompt_tokens"]
+            mas._run_completion_tokens += tu["completion_tokens"]
+            mas._run_total_tokens += tu["total_tokens"]
             
             parsed = safe_json_parse(reply.body if reply else "{}")
             code = extract_code(str(parsed.get("code", "")))
@@ -217,7 +269,8 @@ class SpadeCodingMAS(CodingMASBase):
                 event_type="agent_output", actor="Writer", target="Commander",
                 event_name=EVENT_GENERATE_CODE, phase=PHASE_GENERATION,
                 duration_ms=node_ms, llm_api_duration_ms=llm_ms,
-                payload={"step": EVENT_GENERATE_CODE, "writer_notes": ctx.writer_notes, "writer_code": ctx.writer_code}
+                payload={"step": EVENT_GENERATE_CODE, "writer_notes": ctx.writer_notes, "writer_code": ctx.writer_code},
+                token_usage=tu
             )
             mas._mark_step_end()
             mas._accum_between_step_gap()
@@ -257,10 +310,24 @@ class SpadeCodingMAS(CodingMASBase):
                 msg = Message(to="safeguard@localhost")
                 msg.set_metadata("message_type", "llm")
                 msg.body = safeguard_prompt
+                
+                prev_prompt = _GLOBAL_PROMPT_TOKENS
+                prev_comp = _GLOBAL_COMPLETION_TOKENS
+                prev_total = _GLOBAL_TOTAL_TOKENS
+                
                 t_llm = time.perf_counter()
                 await behav.send(msg)
                 reply = await behav.receive(timeout=120)
                 llm_ms = (time.perf_counter() - t_llm) * 1000.0
+                
+                tu = {
+                    "prompt_tokens": _GLOBAL_PROMPT_TOKENS - prev_prompt,
+                    "completion_tokens": _GLOBAL_COMPLETION_TOKENS - prev_comp,
+                    "total_tokens": _GLOBAL_TOTAL_TOKENS - prev_total
+                }
+                mas._run_prompt_tokens += tu["prompt_tokens"]
+                mas._run_completion_tokens += tu["completion_tokens"]
+                mas._run_total_tokens += tu["total_tokens"]
                 
                 parsed = safe_json_parse(reply.body if reply else "{}")
                 ctx.safeguard_allowed = bool(parsed.get("allow", False))
@@ -270,7 +337,8 @@ class SpadeCodingMAS(CodingMASBase):
                 mas.log_conversation_event(
                     event_type="agent_output", actor="Safeguard", target="Commander", event_name=EVENT_SAFEGUARD_REVIEW,
                     phase=PHASE_COORDINATION, duration_ms=node_ms, llm_api_duration_ms=llm_ms,
-                    payload={"step": EVENT_SAFEGUARD_REVIEW, "allow": ctx.safeguard_allowed, "reason": ctx.safeguard_reason}
+                    payload={"step": EVENT_SAFEGUARD_REVIEW, "allow": ctx.safeguard_allowed, "reason": ctx.safeguard_reason},
+                    token_usage=tu
                 )
                 mas._mark_step_end()
 
@@ -303,10 +371,24 @@ class SpadeCodingMAS(CodingMASBase):
                     msg = Message(to="commander@localhost")
                     msg.set_metadata("message_type", "llm")
                     msg.body = decide_prompt
+                    
+                    prev_prompt = _GLOBAL_PROMPT_TOKENS
+                    prev_comp = _GLOBAL_COMPLETION_TOKENS
+                    prev_total = _GLOBAL_TOTAL_TOKENS
+                    
                     t_llm = time.perf_counter()
                     await behav.send(msg)
                     reply = await behav.receive(timeout=120)
                     llm_ms = (time.perf_counter() - t_llm) * 1000.0
+                    
+                    tu = {
+                        "prompt_tokens": _GLOBAL_PROMPT_TOKENS - prev_prompt,
+                        "completion_tokens": _GLOBAL_COMPLETION_TOKENS - prev_comp,
+                        "total_tokens": _GLOBAL_TOTAL_TOKENS - prev_total
+                    }
+                    mas._run_prompt_tokens += tu["prompt_tokens"]
+                    mas._run_completion_tokens += tu["completion_tokens"]
+                    mas._run_total_tokens += tu["total_tokens"]
                     
                     parsed = safe_json_parse(reply.body if reply else "{}")
                     ctx.requires_execution = bool(parsed.get("requires_execution", True))
@@ -315,7 +397,8 @@ class SpadeCodingMAS(CodingMASBase):
                     mas.log_conversation_event(
                         event_type="action", actor="Commander", event_name=EVENT_DECIDE_EXECUTION,
                         phase=PHASE_COORDINATION, duration_ms=node_ms, llm_api_duration_ms=llm_ms,
-                        payload={"step": EVENT_DECIDE_EXECUTION, "requires_execution": ctx.requires_execution}
+                        payload={"step": EVENT_DECIDE_EXECUTION, "requires_execution": ctx.requires_execution},
+                        token_usage=tu
                     )
                     mas._mark_step_end()
 
@@ -360,10 +443,24 @@ class SpadeCodingMAS(CodingMASBase):
                     msg = Message(to="writer@localhost")
                     msg.set_metadata("message_type", "llm")
                     msg.body = interpret_prompt
+                    
+                    prev_prompt = _GLOBAL_PROMPT_TOKENS
+                    prev_comp = _GLOBAL_COMPLETION_TOKENS
+                    prev_total = _GLOBAL_TOTAL_TOKENS
+                    
                     t_llm = time.perf_counter()
                     await behav.send(msg)
                     reply = await behav.receive(timeout=120)
                     llm_ms = (time.perf_counter() - t_llm) * 1000.0
+                    
+                    tu = {
+                        "prompt_tokens": _GLOBAL_PROMPT_TOKENS - prev_prompt,
+                        "completion_tokens": _GLOBAL_COMPLETION_TOKENS - prev_comp,
+                        "total_tokens": _GLOBAL_TOTAL_TOKENS - prev_total
+                    }
+                    mas._run_prompt_tokens += tu["prompt_tokens"]
+                    mas._run_completion_tokens += tu["completion_tokens"]
+                    mas._run_total_tokens += tu["total_tokens"]
                     
                     ctx.writer_interpretation = reply.body if reply else ""
                     node_ms = (time.perf_counter() - t_node) * 1000.0
@@ -371,7 +468,8 @@ class SpadeCodingMAS(CodingMASBase):
                     mas.log_conversation_event(
                         event_type="agent_output", actor="Writer", target="Commander", event_name=EVENT_WRITER_INTERPRET,
                         phase=PHASE_GENERATION, duration_ms=node_ms, llm_api_duration_ms=llm_ms,
-                        payload={"step": EVENT_WRITER_INTERPRET, "writer_interpretation": ctx.writer_interpretation}
+                        payload={"step": EVENT_WRITER_INTERPRET, "writer_interpretation": ctx.writer_interpretation},
+                        token_usage=tu
                     )
                     mas._mark_step_end()
 
@@ -399,10 +497,24 @@ class SpadeCodingMAS(CodingMASBase):
             msg = Message(to="commander@localhost")
             msg.set_metadata("message_type", "llm")
             msg.body = redirect_prompt
+            
+            prev_prompt = _GLOBAL_PROMPT_TOKENS
+            prev_comp = _GLOBAL_COMPLETION_TOKENS
+            prev_total = _GLOBAL_TOTAL_TOKENS
+            
             t_llm = time.perf_counter()
             await behav.send(msg)
             reply = await behav.receive(timeout=120)
             llm_ms = (time.perf_counter() - t_llm) * 1000.0
+            
+            tu = {
+                "prompt_tokens": _GLOBAL_PROMPT_TOKENS - prev_prompt,
+                "completion_tokens": _GLOBAL_COMPLETION_TOKENS - prev_comp,
+                "total_tokens": _GLOBAL_TOTAL_TOKENS - prev_total
+            }
+            mas._run_prompt_tokens += tu["prompt_tokens"]
+            mas._run_completion_tokens += tu["completion_tokens"]
+            mas._run_total_tokens += tu["total_tokens"]
             
             ctx.commander_context = reply.body if reply else ""
             node_ms = (time.perf_counter() - t_node) * 1000.0
@@ -410,7 +522,8 @@ class SpadeCodingMAS(CodingMASBase):
             mas.log_conversation_event(
                 event_type="pass", actor="Commander", target="Writer", event_name=EVENT_REDIRECT_WRITER,
                 phase=PHASE_COORDINATION, duration_ms=node_ms, llm_api_duration_ms=llm_ms,
-                payload={"step": EVENT_REDIRECT_WRITER, "attempt": ctx.attempt, "redirect_context": ctx.commander_context}
+                payload={"step": EVENT_REDIRECT_WRITER, "attempt": ctx.attempt, "redirect_context": ctx.commander_context},
+                token_usage=tu
             )
             ctx.writer_interpretation = ""
             ctx.safeguard_allowed = False
@@ -437,12 +550,28 @@ class SpadeCodingMAS(CodingMASBase):
             msg = Message(to="commander@localhost")
             msg.set_metadata("message_type", "llm")
             msg.body = conclude_prompt
+            
+            prev_prompt = _GLOBAL_PROMPT_TOKENS
+            prev_comp = _GLOBAL_COMPLETION_TOKENS
+            prev_total = _GLOBAL_TOTAL_TOKENS
+            
             t_llm = time.perf_counter()
             await behav.send(msg)
             reply = await behav.receive(timeout=120)
             llm_ms = (time.perf_counter() - t_llm) * 1000.0
+            
+            tu = {
+                "prompt_tokens": _GLOBAL_PROMPT_TOKENS - prev_prompt,
+                "completion_tokens": _GLOBAL_COMPLETION_TOKENS - prev_comp,
+                "total_tokens": _GLOBAL_TOTAL_TOKENS - prev_total
+            }
+            mas._run_prompt_tokens += tu["prompt_tokens"]
+            mas._run_completion_tokens += tu["completion_tokens"]
+            mas._run_total_tokens += tu["total_tokens"]
+            
             final = reply.body if reply else ""
         else:
+            tu = {}
             if not ctx.safeguard_allowed and ctx.safeguard_reason:
                 final = f"I could not complete this request: the Safeguard did not clear the proposed code after retries. Details: {ctx.safeguard_reason}"
             elif ctx.execution_error and ctx.requires_execution:
@@ -457,7 +586,8 @@ class SpadeCodingMAS(CodingMASBase):
         mas.log_conversation_event(
             event_type="final", actor="Commander", event_name=EVENT_CONCLUDE, phase=PHASE_FINALIZATION,
             duration_ms=conclude_dur_ms, llm_api_duration_ms=llm_ms,
-            payload={"step": EVENT_CONCLUDE, "final_answer": final, "safeguard_allowed": ctx.safeguard_allowed, "execution_error": ctx.execution_error}
+            payload={"step": EVENT_CONCLUDE, "final_answer": final, "safeguard_allowed": ctx.safeguard_allowed, "execution_error": ctx.execution_error},
+            token_usage=tu if sum(tu.values()) > 0 else None
         )
         mas._mark_step_end()
         mas.memory.append(f"Q: {ctx.user_query} | A: {final}")

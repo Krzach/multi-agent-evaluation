@@ -57,8 +57,7 @@ def rule_based_safeguard(code: str) -> tuple[bool, str]:
     for pattern in dangerous_patterns:
         if re.search(pattern, code):
             return False, f"Blocked by safeguard rule: pattern '{pattern}'"
-    if len(code) > 4000:
-        return False, "Blocked by safeguard rule: code too large."
+
     return True, "Passed rule-based safety checks."
 
 

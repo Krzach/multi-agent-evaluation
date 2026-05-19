@@ -5,14 +5,27 @@ Aggregates correctness, latency, token usage, and collaboration counters; writes
 Markdown tables to ``results.md`` (configurable via ``--output``), and optionally raw JSON.
 
 By default the first five AetherCode tasks (``Easy`` difficulty) are included; set ``--aether-tasks 0``
-to skip AetherCode.
+to skip AetherCode. Use ``--aether-only`` to run AetherCode only (no HumanEval).
 
 Usage::
 
     python cross_framework_benchmark.py --repeats 3
     python cross_framework_benchmark.py --tasks 5 --repeats 5 --output results.md --save-json runs.json
+    python cross_framework_benchmark.py --resume
+    python cross_framework_benchmark.py --resume-from results/cross_framework_results.json --save-json results/cross_framework_results.json
+    python cross_framework_benchmark.py --resume-from results/old.json --save-json results/new.json
+    python cross_framework_benchmark.py --resume --save-json-mode unique
+    python cross_framework_benchmark.py --aether-only --aether-tasks 5 --resume
 
 By default the Markdown report is written to ``results.md`` in the current working directory.
+
+Raw JSON is updated after each completed run. On ``KeyboardInterrupt`` or other errors during
+evaluation, partial results are written to ``--save-json`` before exit.
+
+Use ``--resume`` to load prior runs from ``--save-json`` (if that file exists) and skip completed
+``(framework, task_id, repeat)`` slots, merging new runs into the output. Use ``--resume-from PATH``
+to load a different JSON; output still goes to ``--save-json`` unless ``--save-json-mode unique`` picks
+an unused filename next to an existing ``--save-json`` path.
 
 Requires ``OPENAI_API_KEY`` and network for the Hugging Face / OpenAI calls. AetherCode uses
 ``datasets`` (Hugging Face) and may download ``testlib.h`` for checker compilation.
@@ -28,7 +41,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from dotenv import load_dotenv
 
@@ -131,6 +144,73 @@ class RunRecord:
     result: Dict[str, Any]
 
 
+def _payload_from_records(records: List[RunRecord]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "framework": r.framework,
+            "task_id": r.task_id,
+            "repeat": r.repeat,
+            **r.result,
+        }
+        for r in records
+    ]
+
+
+def _save_records_json(records: List[RunRecord], path: Path) -> None:
+    """Write run records to JSON (atomic replace). No-op when *records* is empty."""
+    if not records:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(json.dumps(_payload_from_records(records), indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _run_key(framework: str, task_id: str, repeat: int) -> Tuple[str, str, int]:
+    return (str(framework), str(task_id), int(repeat))
+
+
+def _record_from_payload(row: Dict[str, Any]) -> RunRecord:
+    fw = str(row.get("framework", ""))
+    tid = str(row.get("task_id", ""))
+    rep = int(row.get("repeat", 0))
+    result = {k: v for k, v in row.items() if k not in ("framework", "task_id", "repeat")}
+    return RunRecord(framework=fw, task_id=tid, repeat=rep, result=result)
+
+
+def _load_resume_records(path: Path) -> List[RunRecord]:
+    """Load JSON array; dedupe by (framework, task_id, repeat), last occurrence wins."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise SystemExit(f"Resume file must be a JSON array: {path}")
+    merged: Dict[Tuple[str, str, int], RunRecord] = {}
+    order: List[Tuple[str, str, int]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        rec = _record_from_payload(row)
+        key = _run_key(rec.framework, rec.task_id, rec.repeat)
+        if key not in merged:
+            order.append(key)
+        merged[key] = rec
+    return [merged[k] for k in order]
+
+
+def _next_available_json_path(path: Path) -> Path:
+    """If *path* does not exist, return it; else return path stem_1, stem_2, … with same suffix."""
+    if not path.exists():
+        return path
+    stem = path.stem
+    parent = path.parent
+    suffix = path.suffix if path.suffix else ".json"
+    n = 1
+    while True:
+        cand = parent / f"{stem}_{n}{suffix}"
+        if not cand.exists():
+            return cand
+        n += 1
+
+
 def _summarize(values: Sequence[float]) -> Dict[str, float]:
     xs = [float(x) for x in values]
     if not xs:
@@ -190,6 +270,23 @@ def parse_args() -> argparse.Namespace:
         help="Path to write aggregated raw run JSON (default: results/cross_framework_results.json).",
     )
     p.add_argument(
+        "--save-json-mode",
+        choices=("overwrite", "unique"),
+        default="overwrite",
+        help="overwrite: write to --save-json. unique: if that path exists, use stem_1.json, stem_2.json, …",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="If --save-json exists, load it and skip runs already present (framework, task_id, repeat).",
+    )
+    p.add_argument(
+        "--resume-from",
+        default=None,
+        metavar="PATH",
+        help="Load prior runs from this JSON (instead of --save-json) for skip/merge; file must exist.",
+    )
+    p.add_argument(
         "--aether-tasks",
         type=int,
         default=5,
@@ -200,6 +297,11 @@ def parse_args() -> argparse.Namespace:
         default="Easy",
         help="AetherCode difficulty filter (default: Easy).",
     )
+    p.add_argument(
+        "--aether-only",
+        action="store_true",
+        help="Run AetherCode only; skip HumanEval (requires --aether-tasks > 0).",
+    )
     return p.parse_args()
 
 
@@ -209,9 +311,15 @@ def main() -> None:
     if not os.getenv("OPENAI_API_KEY"):
         raise SystemExit("OPENAI_API_KEY is not set.")
 
-    dataset = HumanEvalDataset(split="test")
-    tasks = dataset.get_tasks(limit=args.tasks)
+    if args.aether_only and args.aether_tasks <= 0:
+        raise SystemExit("--aether-only requires --aether-tasks > 0.")
 
+    tasks: List[Dict[str, Any]] = []
+    if not args.aether_only:
+        dataset = HumanEvalDataset(split="test")
+        tasks = dataset.get_tasks(limit=args.tasks)
+        if not tasks:
+            raise SystemExit("No HumanEval tasks loaded.")
 
     aether_tasks: List[Dict[str, Any]] = []
     if args.aether_tasks > 0:
@@ -226,14 +334,19 @@ def main() -> None:
         if not aether_tasks:
             print("Warning: AetherCode loaded zero tasks; skipping AetherCode runs.")
 
-    records: List[RunRecord] = []
+    if args.aether_only and not aether_tasks:
+        raise SystemExit("--aether-only: no AetherCode tasks loaded (check --aether-tasks / difficulty).")
+
     frameworks = ("langchain", "autogen")
 
-    he_runs = len(tasks) * args.repeats * len(frameworks)
-    print(
-        f"HumanEval cross-framework benchmark: {len(tasks)} tasks × {args.repeats} repeats "
-        f"× {len(frameworks)} frameworks = {he_runs} runs."
-    )
+    if tasks:
+        he_runs = len(tasks) * args.repeats * len(frameworks)
+        print(
+            f"HumanEval cross-framework benchmark: {len(tasks)} tasks × {args.repeats} repeats "
+            f"× {len(frameworks)} frameworks = {he_runs} runs."
+        )
+    elif args.aether_only:
+        print("HumanEval: skipped (--aether-only).")
     if aether_tasks:
         ae_runs = len(aether_tasks) * args.repeats * len(frameworks)
         print(
@@ -242,49 +355,109 @@ def main() -> None:
         )
     print(f"Model={args.model!r}, max_iterations={args.max_iterations}")
 
-    for fw in frameworks:
-        mas = _build_mas(fw, args.model, args.max_iterations)
-        runner = HumanEvalRunner(mas_instance=mas)
-        for rep in range(args.repeats):
-            for task in tasks:
-                tid = str(task.get("task_id", ""))
-                print(f"  [{fw}] repeat {rep + 1}/{args.repeats} task {tid} …", flush=True)
-                row = runner.evaluate([task])[0]
-                records.append(RunRecord(framework=fw, task_id=tid, repeat=rep, result=row))
+    resume_source: Path | None = None
+    if args.resume_from:
+        resume_source = Path(args.resume_from)
+    elif args.resume:
+        resume_source = Path(args.save_json)
 
-    if aether_tasks:
-        a_fw = _aether_framework_label
-        for fw in frameworks:
-            mas = _build_mas(fw, args.model, args.max_iterations)
-            runner = AetherCodeRunner(mas_instance=mas)
-            label = a_fw(fw)
-            for rep in range(args.repeats):
-                for item in aether_tasks:
-                    tid = str(item.get("id", ""))
-                    print(f"  [{label}] repeat {rep + 1}/{args.repeats} task {tid} …", flush=True)
-                    row = runner.evaluate([item])[0]
-                    records.append(RunRecord(framework=label, task_id=tid, repeat=rep, result=row))
+    records: List[RunRecord] = []
+    done: Set[Tuple[str, str, int]] = set()
+    if resume_source is not None:
+        if not resume_source.is_file():
+            if args.resume_from:
+                raise SystemExit(f"--resume-from file not found: {resume_source}")
+            print(f"Resume: {resume_source} not found; starting with no prior runs.", flush=True)
+        else:
+            records = _load_resume_records(resume_source)
+            done = {_run_key(r.framework, r.task_id, r.repeat) for r in records}
+            print(f"Resume: loaded {len(records)} run(s) from {resume_source}", flush=True)
 
-    payload = [
-        {
-            "framework": r.framework,
-            "task_id": r.task_id,
-            "repeat": r.repeat,
-            **r.result,
-        }
-        for r in records
-    ]
     json_path = Path(args.save_json)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"\nWrote raw runs to {json_path}")
-    raw_runs = json.loads(json_path.read_text(encoding="utf-8"))
+    if args.save_json_mode == "unique":
+        chosen = _next_available_json_path(json_path)
+        if chosen.resolve() != json_path.resolve():
+            print(f"--save-json-mode unique: writing to {chosen} (avoid existing file)", flush=True)
+        json_path = chosen
 
-    frameworks_for_report = [
-        fw for fw in frameworks if any(str(r.get("framework", "")) == fw for r in raw_runs)
-    ]
+    skipped = 0
+    try:
+        if tasks:
+            for fw in frameworks:
+                mas = _build_mas(fw, args.model, args.max_iterations)
+                runner = HumanEvalRunner(mas_instance=mas)
+                for rep in range(args.repeats):
+                    for task in tasks:
+                        tid = str(task.get("task_id", ""))
+                        key = _run_key(fw, tid, rep)
+                        if key in done:
+                            skipped += 1
+                            print(
+                                f"  [{fw}] repeat {rep + 1}/{args.repeats} task {tid} … "
+                                "skipped (resume)",
+                                flush=True,
+                            )
+                            continue
+                        print(f"  [{fw}] repeat {rep + 1}/{args.repeats} task {tid} …", flush=True)
+                        row = runner.evaluate([task])[0]
+                        records.append(RunRecord(framework=fw, task_id=tid, repeat=rep, result=row))
+                        done.add(key)
+                        _save_records_json(records, json_path)
+
+        if aether_tasks:
+            a_fw = _aether_framework_label
+            for fw in frameworks:
+                mas = _build_mas(fw, args.model, args.max_iterations)
+                runner = AetherCodeRunner(mas_instance=mas)
+                label = a_fw(fw)
+                for rep in range(args.repeats):
+                    for item in aether_tasks:
+                        tid = str(item.get("id", ""))
+                        key = _run_key(label, tid, rep)
+                        if key in done:
+                            skipped += 1
+                            print(
+                                f"  [{label}] repeat {rep + 1}/{args.repeats} task {tid} … "
+                                "skipped (resume)",
+                                flush=True,
+                            )
+                            continue
+                        print(
+                            f"  [{label}] repeat {rep + 1}/{args.repeats} task {tid} …",
+                            flush=True,
+                        )
+                        row = runner.evaluate([item])[0]
+                        records.append(
+                            RunRecord(framework=label, task_id=tid, repeat=rep, result=row)
+                        )
+                        done.add(key)
+                        _save_records_json(records, json_path)
+    except KeyboardInterrupt:
+        if records:
+            _save_records_json(records, json_path)
+            print(f"\nInterrupted — saved {len(records)} run(s) to {json_path}")
+        raise SystemExit(130) from None
+    except Exception:
+        if records:
+            _save_records_json(records, json_path)
+            print(f"\nError — saved {len(records)} partial run(s) to {json_path}")
+        raise
+
+    if not records:
+        raise SystemExit("No runs in memory; nothing to report (empty resume file and no new runs?).")
+
+    print(f"\nWrote raw runs to {json_path}")
+    if skipped:
+        print(f"Resume: skipped {skipped} run(s) already present in the merged JSON.")
+    raw_runs = _payload_from_records(records)
+
+    frameworks_for_report: List[str] = []
+    for r in raw_runs:
+        fw = str(r.get("framework", ""))
+        if fw and fw not in frameworks_for_report:
+            frameworks_for_report.append(fw)
     if not frameworks_for_report:
-        frameworks_for_report = list(frameworks)
+        frameworks_for_report = [_aether_framework_label(fw) for fw in frameworks] if args.aether_only else list(frameworks)
 
     summary_headers = [
         "framework",
@@ -503,47 +676,67 @@ def main() -> None:
 
     ts_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     aether_line = "- **AetherCode:** skipped (`--aether-tasks 0`)"
-    if args.aether_tasks > 0 and not aether_tasks:
+    if args.aether_only:
+        aether_line = (
+            f"- **AetherCode only:** {len(aether_tasks)} tasks ({args.aether_difficulty}), "
+            f"{args.repeats} repeats per framework"
+        )
+    elif args.aether_tasks > 0 and not aether_tasks:
         aether_line = "- **AetherCode:** requested but zero tasks loaded (check difficulty / dataset)"
     elif aether_tasks:
         aether_line = (
             f"- **AetherCode:** {len(aether_tasks)} tasks ({args.aether_difficulty}), "
             f"{args.repeats} repeats per framework"
         )
+    report_title = (
+        "# AetherCode cross-framework benchmark"
+        if args.aether_only
+        else "# HumanEval & AetherCode cross-framework benchmark"
+    )
     md_lines: List[str] = [
-        "# HumanEval & AetherCode cross-framework benchmark",
+        report_title,
         "",
         f"- **Generated:** {ts_iso}",
-        f"- **HumanEval tasks:** {len(tasks)}",
-        aether_line,
-        f"- **Repeats per task (per framework):** {args.repeats}",
-        f"- **Model:** `{args.model}`",
-        f"- **Max iterations:** {args.max_iterations}",
-        f"- **Raw results JSON:** `{json_path}`",
-        "",
-        "## Overall (all tasks × repeats)",
-        "",
-        markdown_table(summary_headers, summary_rows),
-        "## Token breakdown (mean ± stdev over runs)",
-        "",
-        markdown_table(token_headers, token_rows),
-        "## Collaboration metrics (mean ± stdev over runs)",
-        "",
-        markdown_table(collab_headers, collab_rows),
-        "## Wall-time decomposition (mean ± stdev over runs)",
-        "",
-        "Task wall is runner `answer()` wall time when available; residual = task wall − logged LLM time − logged `execute_code` duration.",
-        "",
-        markdown_table(wall_decomp_headers, wall_decomp_rows),
-        "## Per-step residual overhead (within-run stats, then mean ± stdev across runs)",
-        "",
-        "Per logged event with `duration_ms`: `max(0, duration − llm_api − tool)`; `tool` is full step time for `execute_code` only.",
-        "",
-        markdown_table(per_step_headers, per_step_rows),
-        "## Per-task HumanEval (mean over repeats)",
-        "",
-        markdown_table(per_task_headers, per_task_rows),
     ]
+    if not args.aether_only:
+        md_lines.append(f"- **HumanEval tasks:** {len(tasks)}")
+    md_lines.append(aether_line)
+    md_lines.extend(
+        [
+            f"- **Repeats per task (per framework):** {args.repeats}",
+            f"- **Model:** `{args.model}`",
+            f"- **Max iterations:** {args.max_iterations}",
+            f"- **Raw results JSON:** `{json_path}`",
+            "",
+            "## Overall (all tasks × repeats)",
+            "",
+            markdown_table(summary_headers, summary_rows),
+            "## Token breakdown (mean ± stdev over runs)",
+            "",
+            markdown_table(token_headers, token_rows),
+            "## Collaboration metrics (mean ± stdev over runs)",
+            "",
+            markdown_table(collab_headers, collab_rows),
+            "## Wall-time decomposition (mean ± stdev over runs)",
+            "",
+            "Task wall is runner `answer()` wall time when available; residual = task wall − logged LLM time − logged `execute_code` duration.",
+            "",
+            markdown_table(wall_decomp_headers, wall_decomp_rows),
+            "## Per-step residual overhead (within-run stats, then mean ± stdev across runs)",
+            "",
+            "Per logged event with `duration_ms`: `max(0, duration − llm_api − tool)`; `tool` is full step time for `execute_code` only.",
+            "",
+            markdown_table(per_step_headers, per_step_rows),
+        ]
+    )
+    if tasks and per_task_rows:
+        md_lines.extend(
+            [
+                "## Per-task HumanEval (mean over repeats)",
+                "",
+                markdown_table(per_task_headers, per_task_rows),
+            ]
+        )
     if aether_tasks and aether_per_task_rows:
         md_lines.extend(
             [

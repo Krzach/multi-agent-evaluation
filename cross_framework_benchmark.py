@@ -51,6 +51,8 @@ from benchmarks.human_eval.dataset import HumanEvalDataset
 from benchmarks.human_eval.runner import HumanEvalRunner
 from coding_scenario.autogen.autogen_mas import AutoGenCodingMAS
 from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
+from coding_scenario.spade_mas import SpadeCodingMAS
+from coding_scenario.single_agent_mas import SingleAgentMAS
 
 
 def _aether_framework_label(base: str) -> str:
@@ -82,6 +84,10 @@ def _build_mas(framework: str, model_id: str, max_iterations: int) -> Any:
     if framework == "autogen":
         mid = "gpt-5.4-2026-03-05" if model_id == "gpt-5.4" else model_id
         return AutoGenCodingMAS(model_id=mid, max_iterations=max_iterations)
+    if framework == "spade":
+        return SpadeCodingMAS(model_id=model_id, max_iterations=max_iterations)
+    if framework == "single_agent":
+        return SingleAgentMAS(model_id=model_id, max_iterations=max_iterations)
     raise ValueError(f"Unknown framework: {framework}")
 
 
@@ -337,7 +343,7 @@ def main() -> None:
     if args.aether_only and not aether_tasks:
         raise SystemExit("--aether-only: no AetherCode tasks loaded (check --aether-tasks / difficulty).")
 
-    frameworks = ("langchain", "autogen")
+    frameworks = ("langchain", "autogen", "spade", "single_agent")
 
     if tasks:
         he_runs = len(tasks) * args.repeats * len(frameworks)

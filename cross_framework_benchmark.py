@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Run HumanEval on the first N tasks for LangChain and AutoGen, with repeated trials.
+"""Run HumanEval and optional AetherCode for LangChain and AutoGen, with repeated trials.
 
 Aggregates correctness, latency, token usage, and collaboration counters; writes GitHub-flavored
 Markdown tables to ``results.md`` (configurable via ``--output``), and optionally raw JSON.
+
+By default the first five AetherCode tasks (``Easy`` difficulty) are included; set ``--aether-tasks 0``
+to skip AetherCode.
 
 Usage::
 
@@ -11,7 +14,8 @@ Usage::
 
 By default the Markdown report is written to ``results.md`` in the current working directory.
 
-Requires ``OPENAI_API_KEY`` and network for the Hugging Face / OpenAI calls.
+Requires ``OPENAI_API_KEY`` and network for the Hugging Face / OpenAI calls. AetherCode uses
+``datasets`` (Hugging Face) and may download ``testlib.h`` for checker compilation.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import argparse
 import json
 import os
 import statistics
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,10 +32,35 @@ from typing import Any, Dict, List, Sequence
 
 from dotenv import load_dotenv
 
+from benchmarks.aether_code.dataset import AetherCodeDataset
+from benchmarks.aether_code.runner import AetherCodeRunner
 from benchmarks.human_eval.dataset import HumanEvalDataset
 from benchmarks.human_eval.runner import HumanEvalRunner
 from coding_scenario.autogen.autogen_mas import AutoGenCodingMAS
 from coding_scenario.langchain.langchain_mas import LangchainCodingMAS
+
+
+def _aether_framework_label(base: str) -> str:
+    return f"aether_{base}"
+
+
+def _ensure_testlib_for_aether() -> None:
+    """Download testlib.h into cwd once so Aether checker compilation can find it."""
+    if os.path.exists("testlib.h"):
+        return
+    try:
+        subprocess.run(
+            [
+                "wget",
+                "-q",
+                "-O",
+                "testlib.h",
+                "https://raw.githubusercontent.com/MikeMirzayanov/testlib/master/testlib.h",
+            ],
+            check=False,
+        )
+    except OSError:
+        pass
 
 
 def _build_mas(framework: str, model_id: str, max_iterations: int) -> Any:
@@ -139,7 +169,7 @@ def markdown_table(headers: List[str], rows: List[List[str]]) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Cross-framework HumanEval benchmark with repeats.")
+    p = argparse.ArgumentParser(description="Cross-framework HumanEval and optional AetherCode benchmark.")
     p.add_argument("--tasks", type=int, default=5, help="First N HumanEval tasks (default: 5).")
     p.add_argument(
         "--repeats",
@@ -159,6 +189,17 @@ def parse_args() -> argparse.Namespace:
         default="results/cross_framework_results.json",
         help="Path to write aggregated raw run JSON (default: results/cross_framework_results.json).",
     )
+    p.add_argument(
+        "--aether-tasks",
+        type=int,
+        default=5,
+        help="First N AetherCode tasks to run per framework (0 skips AetherCode; default: 5).",
+    )
+    p.add_argument(
+        "--aether-difficulty",
+        default="Easy",
+        help="AetherCode difficulty filter (default: Easy).",
+    )
     return p.parse_args()
 
 
@@ -170,16 +211,35 @@ def main() -> None:
 
     dataset = HumanEvalDataset(split="test")
     tasks = dataset.get_tasks(limit=args.tasks)
-    if not tasks:
-        raise SystemExit("No tasks loaded.")
+
+
+    aether_tasks: List[Dict[str, Any]] = []
+    if args.aether_tasks > 0:
+        _ensure_testlib_for_aether()
+        try:
+            aether_ds = AetherCodeDataset(split="test", difficulty=args.aether_difficulty)
+            aether_tasks = aether_ds.get_tasks(limit=args.aether_tasks)
+        except Exception as exc:
+            raise SystemExit(
+                f"Failed to load AetherCode ({exc}). Install `datasets` and ensure network access."
+            ) from exc
+        if not aether_tasks:
+            print("Warning: AetherCode loaded zero tasks; skipping AetherCode runs.")
 
     records: List[RunRecord] = []
     frameworks = ("langchain", "autogen")
 
+    he_runs = len(tasks) * args.repeats * len(frameworks)
     print(
         f"HumanEval cross-framework benchmark: {len(tasks)} tasks × {args.repeats} repeats "
-        f"× {len(frameworks)} frameworks = {len(tasks) * args.repeats * len(frameworks)} runs."
+        f"× {len(frameworks)} frameworks = {he_runs} runs."
     )
+    if aether_tasks:
+        ae_runs = len(aether_tasks) * args.repeats * len(frameworks)
+        print(
+            f"AetherCode ({args.aether_difficulty}): {len(aether_tasks)} tasks × {args.repeats} repeats "
+            f"× {len(frameworks)} frameworks = {ae_runs} runs."
+        )
     print(f"Model={args.model!r}, max_iterations={args.max_iterations}")
 
     for fw in frameworks:
@@ -191,6 +251,19 @@ def main() -> None:
                 print(f"  [{fw}] repeat {rep + 1}/{args.repeats} task {tid} …", flush=True)
                 row = runner.evaluate([task])[0]
                 records.append(RunRecord(framework=fw, task_id=tid, repeat=rep, result=row))
+
+    if aether_tasks:
+        a_fw = _aether_framework_label
+        for fw in frameworks:
+            mas = _build_mas(fw, args.model, args.max_iterations)
+            runner = AetherCodeRunner(mas_instance=mas)
+            label = a_fw(fw)
+            for rep in range(args.repeats):
+                for item in aether_tasks:
+                    tid = str(item.get("id", ""))
+                    print(f"  [{label}] repeat {rep + 1}/{args.repeats} task {tid} …", flush=True)
+                    row = runner.evaluate([item])[0]
+                    records.append(RunRecord(framework=label, task_id=tid, repeat=rep, result=row))
 
     payload = [
         {
@@ -374,6 +447,7 @@ def main() -> None:
     per_task_headers = ["task_id"] + [
         h
         for fw in frameworks_for_report
+        if not str(fw).startswith("aether_")
         for h in (f"{fw} pass %", f"{fw} time (s)", f"{fw} tokens")
     ]
     per_task_rows: List[List[str]] = []
@@ -382,6 +456,8 @@ def main() -> None:
         tid = str(task.get("task_id", ""))
         row_cells: List[str] = [tid]
         for fw in frameworks_for_report:
+            if str(fw).startswith("aether_"):
+                continue
             sub = [
                 r
                 for r in raw_runs
@@ -399,12 +475,47 @@ def main() -> None:
             row_cells.append(_format_stat(_summarize(toks), precision=0))
         per_task_rows.append(row_cells)
 
+    aether_fws = [fw for fw in frameworks_for_report if str(fw).startswith("aether_")]
+    aether_per_task_headers = ["task_id"] + [
+        h for fw in aether_fws for h in (f"{fw} pass %", f"{fw} time (s)", f"{fw} tokens")
+    ]
+    aether_per_task_rows: List[List[str]] = []
+    for item in aether_tasks:
+        tid = str(item.get("id", ""))
+        row_cells: List[str] = [tid]
+        for fw in aether_fws:
+            sub = [
+                r
+                for r in raw_runs
+                if str(r.get("framework", "")) == fw and str(r.get("task_id", "")) == tid
+            ]
+            if not sub:
+                row_cells.extend(["—", "—", "—"])
+                continue
+            cr = [float(_pick(s, "correctness")) for s in sub]
+            pass_pct = 100.0 * statistics.mean(cr)
+            times = [_pick(s, "time_metrics", "total_task_completion_time_seconds") for s in sub]
+            toks = [_pick(s, "cost_metrics", "total_tokens") for s in sub]
+            row_cells.append(f"{pass_pct:.0f}")
+            row_cells.append(_format_stat(_summarize(times)))
+            row_cells.append(_format_stat(_summarize(toks), precision=0))
+        aether_per_task_rows.append(row_cells)
+
     ts_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    aether_line = "- **AetherCode:** skipped (`--aether-tasks 0`)"
+    if args.aether_tasks > 0 and not aether_tasks:
+        aether_line = "- **AetherCode:** requested but zero tasks loaded (check difficulty / dataset)"
+    elif aether_tasks:
+        aether_line = (
+            f"- **AetherCode:** {len(aether_tasks)} tasks ({args.aether_difficulty}), "
+            f"{args.repeats} repeats per framework"
+        )
     md_lines: List[str] = [
-        "# HumanEval cross-framework benchmark",
+        "# HumanEval & AetherCode cross-framework benchmark",
         "",
         f"- **Generated:** {ts_iso}",
-        f"- **Tasks:** {len(tasks)}",
+        f"- **HumanEval tasks:** {len(tasks)}",
+        aether_line,
         f"- **Repeats per task (per framework):** {args.repeats}",
         f"- **Model:** `{args.model}`",
         f"- **Max iterations:** {args.max_iterations}",
@@ -429,9 +540,20 @@ def main() -> None:
         "Per logged event with `duration_ms`: `max(0, duration − llm_api − tool)`; `tool` is full step time for `execute_code` only.",
         "",
         markdown_table(per_step_headers, per_step_rows),
-        "## Per-task (mean over repeats)",
+        "## Per-task HumanEval (mean over repeats)",
         "",
         markdown_table(per_task_headers, per_task_rows),
+    ]
+    if aether_tasks and aether_per_task_rows:
+        md_lines.extend(
+            [
+                "## Per-task AetherCode (mean over repeats)",
+                "",
+                markdown_table(aether_per_task_headers, aether_per_task_rows),
+            ]
+        )
+    md_lines.extend(
+        [
         "### Legend",
         "",
         "- **pass %:** fraction of repeats that passed × 100.",
@@ -439,8 +561,10 @@ def main() -> None:
         "- **msgs:** `collaboration_metrics.messages_between_agents` (log-derived inter-agent events when available).",
         "- **LLM wall / between-node:** from `conversation_log_metrics` (summed LLM ms; LangGraph/MAS gap callback).",
         "- **Wall-time decomposition / per-step residual:** from `conversation_log_metrics` JSONL-derived fields.",
+        "- **Framework rows** prefixed with `aether_` are AetherCode runs; others are HumanEval.",
         "",
-    ]
+        ]
+    )
     report = "\n".join(md_lines)
     out_path = Path(args.output)
     out_path.write_text(report, encoding="utf-8")

@@ -295,8 +295,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--aether-tasks",
         type=int,
-        default=5,
-        help="First N AetherCode tasks to run per framework (0 skips AetherCode; default: 5).",
+        default=10,
+        help="First N AetherCode tasks to run per framework (0 skips AetherCode; default: 10).",
     )
     p.add_argument(
         "--aether-difficulty",

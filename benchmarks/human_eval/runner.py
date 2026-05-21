@@ -1,5 +1,6 @@
 import logging
 import time
+import textwrap
 from typing import List, Dict, Any
 
 from benchmarks.base import BenchmarkRunner
@@ -78,9 +79,39 @@ class HumanEvalRunner(BenchmarkRunner):
             elif "```" in clean_code:
                 clean_code = clean_code.split("```")[1].split("```")[0]
                 
-            # Combine the original prompt, the generated completion, and the test cases
-            # HumanEval test format relies on `check(entry_point)` being called at the end.
-            full_execution_code = f"{prompt}\n{clean_code}\n\n{test_code}\ncheck({entry_point})"
+            clean_code = clean_code.strip()
+
+            # Check if the agent has regenerated the full function
+            if f"def {entry_point}" in clean_code:
+                # Agent returned the full function definition.
+                # We will use this code directly, but we need to make sure imports from the prompt are included.
+                prompt_lines = prompt.split('\n')
+                import_lines = [line for line in prompt_lines if line.strip().startswith('import ') or line.strip().startswith('from ')]
+                imports_from_prompt = '\n'.join(import_lines)
+                
+                # The full code is the imports from the prompt plus the agent's code
+                full_execution_code = f"{imports_from_prompt}\n{clean_code}\n\n{test_code}\ncheck({entry_point})"
+            else:
+                # Agent returned just the body of the function.
+                # We need to indent it correctly and combine it with the prompt.
+                
+                # Fix for first-line indentation issue
+                clean_lines = clean_code.split('\n')
+                if clean_lines and len(clean_lines[0]) - len(clean_lines[0].lstrip()) == 0 and len(clean_lines) > 1:
+                    min_indent = float('inf')
+                    for line in clean_lines[1:]:
+                        if line.strip():
+                            min_indent = min(min_indent, len(line) - len(line.lstrip()))
+                    
+                    if min_indent > 0 and min_indent != float('inf'):
+                        clean_lines[0] = ' ' * min_indent + clean_lines[0]
+                        clean_code = '\n'.join(clean_lines)
+
+                # Standardize indentation
+                if clean_code:
+                    clean_code = textwrap.indent(textwrap.dedent(clean_code), "    ")
+
+                full_execution_code = f"{prompt}\n{clean_code}\n\n{test_code}\ncheck({entry_point})"
             
             # Evaluate correctness
             # WARNING: Using `exec` executes untrusted code. In a production evaluation system, 
